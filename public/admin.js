@@ -166,24 +166,40 @@ function setupUpload(kind, form, input, nameInput) {
   });
   form.addEventListener('submit', event => {
     event.preventDefault();
+    if (busy) {
+      uploadFeedback(form, 'Hay otra acción en curso. Vuelve a pulsar el botón cuando termine.');
+      return;
+    }
     const files = Array.from(input.files);
     const custom = nameInput.value.trim();
     task(() => uploadFiles(kind, files, custom, form, nameInput));
   });
 }
 
+function uploadFeedback(form, message, isError = false) {
+  const notice = form.querySelector('[role="status"]');
+  notice.textContent = message;
+  notice.classList.toggle('error', isError);
+  notice.hidden = !message;
+}
+
 async function uploadFiles(kind, files, custom, form, nameInput) {
-  let added = 0;
-  let duplicates = 0;
+  const added = [];
+  const duplicates = [];
   const failures = [];
   for (const [index, file] of files.entries()) {
-    feedback('Subiendo ' + (index + 1) + ' de ' + files.length + '…');
+    uploadFeedback(form, 'Subiendo ' + (index + 1) + ' de ' + files.length + '…');
     const { extension, name } = fileParts(file);
     const params = new URLSearchParams({ extension, name: (files.length === 1 && custom ? custom : name).slice(0, 100) });
     try {
       const result = await api(kind + '?' + params, { method: 'POST', body: file });
-      if (result.alreadyAdded) duplicates++;
-      else added++;
+      const track = result.track;
+      if (result.alreadyAdded) {
+        const state = track.played_at ? 'reproducido' : 'pendiente';
+        duplicates.push('El mismo archivo ya está en la fila ' + track.position + ' como «' + track.name + '» (' + state + ').');
+      } else {
+        added.push('«' + track.name + '» quedó en la fila ' + track.position + '.');
+      }
     } catch (error) {
       failures.push(file.name + ' · ' + error.message);
     }
@@ -192,8 +208,8 @@ async function uploadFiles(kind, files, custom, form, nameInput) {
     form.reset();
     nameInput.disabled = true;
   }
-  feedback(added + ' agregado(s), ' + duplicates + ' ya en la lista.' + (failures.length ? ' ' + failures.join(' | ') : ''),
-    failures.length > 0);
+  const success = added.length > 1 ? 'Se agregaron ' + added.length + ' grabaciones a la lista.' : added[0];
+  uploadFeedback(form, [success, ...duplicates, ...failures].filter(Boolean).join(' '), failures.length > 0);
 }
 
 setupUpload('audio', get('upload'), get('audio'), get('name'));

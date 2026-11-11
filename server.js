@@ -230,12 +230,16 @@ async function upload(req, url, kind) {
       await db.query('UPDATE room SET wallpaper = $1 WHERE id = 1', [id]);
       return { url: '/media/' + id };
     }
-    const { rowCount } = await db.query(`
+    const { rows: [created] } = await db.query(`
       INSERT INTO tracks (id, media_id, name, position)
       SELECT $1, $2, $3, coalesce(max(position), 0) + 1 FROM tracks
       ON CONFLICT (media_id) DO NOTHING
+      RETURNING name, position, played_at
     `, [randomUUID(), id, name]);
-    return { url: '/media/' + id, alreadyAdded: rowCount === 0 };
+    const track = created ?? (await db.query(
+      'SELECT name, position, played_at FROM tracks WHERE media_id = $1', [id]
+    )).rows[0];
+    return { url: '/media/' + id, alreadyAdded: !created, track };
   });
 }
 
