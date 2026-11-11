@@ -1,0 +1,34 @@
+:root { color-scheme: dark; font: 16px/1.5 "Segoe UI", system-ui, sans-serif; background: #201916; color: #fff7ee; }
+* { box-sizing: border-box; }
+body { margin: 0; background: radial-gradient(ellipse at top, #493528, #201916 65%); min-height: 100vh; }
+[hidden] { display: none !important; }
+.shell { width: min(1100px, 100%); margin: 0 auto; padding: clamp(1rem, 4vw, 3.25rem); }
+.home { max-width: 650px; }
+h1 { font-size: clamp(2rem, 6vw, 3.5rem); letter-spacing: -.055em; line-height: 1; margin: 0; }
+h2 { font-size: 1.15rem; margin: 0 0 .75rem; }
+header { display: flex; gap: 1rem; justify-content: space-between; align-items: center; margin-bottom: 1.4rem; }
+.panel { border: 1px solid #ffdec530; background: #322620; padding: 1.1rem; border-radius: 1rem; margin-bottom: 1rem; }
+.panel p { margin: .25rem 0; }
+.panel form, form.panel { display: grid; align-content: start; gap: .5rem; }
+.login { max-width: 30rem; }
+.setup-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
+.live { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; }
+.actions { display: flex; flex-wrap: wrap; gap: .45rem; align-items: center; }
+button, input, .button { font: inherit; }
+input { width: 100%; min-width: 0; border: 1px solid #ffdec550; background: #241a16; border-radius: .45rem; padding: .55rem .65rem; color: inherit; }
+input:disabled { opacity: .5; }
+button, .button { display: inline-block; border: 1px solid #ffdec550; border-radius: .55rem; padding: .5rem .75rem; background: #47352b; color: inherit; text-decoration: none; cursor: pointer; }
+button:hover:not(:disabled), .button:hover { filter: brightness(1.18); }
+button:disabled { cursor: default; opacity: .4; }
+button:focus-visible, .button:focus-visible, input:focus-visible { outline: 2px solid #f6c486; outline-offset: 2px; }
+.primary { background: #ffe1be; color: #251811; font-weight: 650; }
+small, #progress, #empty { color: #e2c9ba; }
+.feedback { border: 1px solid #ffdec550; border-radius: .65rem; padding: .65rem .85rem; background: #382a22; }
+.feedback.error { background: #592b27; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; text-align: left; }
+th, td { padding: .65rem .55rem; border-bottom: 1px solid #ffdec526; }
+td:nth-child(2) { overflow-wrap: anywhere; }
+td button { font-size: .86rem; }
+tr[data-active="true"] { background: #63442c80; }
+@media (max-width: 670px) { .setup-grid { grid-template-columns: 1fr; gap: 0; } header { align-items: flex-start; } }

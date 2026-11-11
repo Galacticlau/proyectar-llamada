@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Administración · Llamada para proyectar</title>
+  <link rel="stylesheet" href="/admin.css">
+  <script src="/admin.js" defer></script>
+</head>
+<body>
+<main class="shell">
+  <header><h1>Llamada para proyectar</h1><button id="logout" hidden type="button">Cerrar sesión</button></header>
+  <p class="feedback" id="feedback" role="status" hidden></p>
+  <form class="panel login" id="login">
+    <h2>Administración</h2>
+    <label for="key">Clave de administración</label>
+    <input type="password" id="key" required autocomplete="current-password">
+    <button class="primary" type="submit">Entrar</button>
+  </form>
+  <div id="panel" hidden>
+    <section class="panel live" aria-labelledby="live-title">
+      <div>
+        <h2 id="live-title">Proyección</h2>
+        <p id="status" aria-live="polite"></p>
+        <p id="progress"></p>
+      </div>
+      <div class="actions">
+        <a class="button" id="screen" target="_blank" rel="noopener noreferrer">Abrir pantalla de usuario</a>
+        <button id="launch" type="button" class="primary">Lanzar siguiente llamada</button>
+      </div>
+    </section>
+    <div class="setup-grid">
+      <form class="panel" id="upload">
+        <h2>Cargar audios</h2>
+        <label for="audio">Archivos de audio</label>
+        <input id="audio" type="file" multiple required accept=".mp3,.wav,.m4a,.mp4,.ogg,.opus,.aac,.webm,.flac">
+        <label for="name">Nombre en pantalla</label>
+        <input id="name" maxlength="100" placeholder="Nombre del archivo" disabled>
+        <small>Al cargar varios, se usa el nombre de cada archivo. Máximo 32 MB por audio.</small>
+        <button type="submit">Subir a la lista</button>
+      </form>
+      <form class="panel" id="background">
+        <h2>Fondo de la llamada</h2>
+        <label for="image">Imagen JPG, PNG o WebP</label>
+        <input id="image" type="file" required accept=".jpg,.jpeg,.png,.webp">
+        <small>Máximo 10 MB.</small>
+        <button type="submit">Guardar fondo</button>
+      </form>
+    </div>
+    <section class="panel" aria-labelledby="order-title">
+      <h2 id="order-title">Orden de las llamadas</h2>
+      <p id="empty">Todavía no hay audios en la lista.</p>
+      <div class="table-scroll">
+        <table id="queue" hidden>
+          <thead><tr><th scope="col">Orden</th><th scope="col">Nombre</th><th scope="col">Estado</th><th scope="col">Acciones</th></tr></thead>
+          <tbody id="tracks"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+</main>
+</body>
+</html>

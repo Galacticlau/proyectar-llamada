@@ -1,0 +1,214 @@
+const get = id => document.getElementById(id);
+const stage = get('stage');
+const ringtone = get('ringtone');
+const recording = get('recording');
+const status = get('status');
+const notice = get('notice');
+const enable = get('enable');
+const key = location.hash.slice(1);
+const finishKey = 'llamada-fin:' + key;
+const labels = {
+  waiting: 'Esperando la siguiente llamada', ringing: 'Llamada entrante',
+  playing: 'En llamada', snoozed: 'Volverá a sonar en 5 segundos',
+  rejected: 'Llamada rechazada', interrupted: 'Audio pendiente'
+};
+const headers = { Authorization: 'Bearer ' + key };
+let snapshot;
+let unlocked = false;
+let ringingAttempt;
+let activeAttempt;
+let failedAttempt;
+let pendingFinish = sessionStorage.getItem(finishKey);
+let busy = false;
+let polling = false;
+let lastHeartbeat = 0;
+
+async function request(path, options = {}) {
+  const response = await fetch('/api/screen/' + path, {
+    ...options, headers: { ...headers, ...options.headers }
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
+function send(action, attempt) {
+  return request('action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, attempt }) });
+}
+
+function showNotice(message) {
+  notice.textContent = message;
+  notice.hidden = !message;
+}
+
+function stopRing() {
+  ringtone.pause();
+  ringtone.currentTime = 0;
+}
+
+function updateTimer() {
+  const seconds = Math.floor(recording.currentTime);
+  status.textContent = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
+}
+
+function render(data) {
+  snapshot = data;
+  const ringing = data.phase === 'ringing';
+  const playing = data.phase === 'playing' && activeAttempt === data.attempt;
+  stage.dataset.mode = ringing ? 'ringing' : playing ? 'active' : data.phase;
+  get('caller').textContent = data.name || 'En espera';
+  if (playing) updateTimer();
+  else status.textContent = labels[data.phase];
+  get('ring-actions').hidden = !ringing;
+  get('dots').hidden = !ringing;
+  get('wave').hidden = !playing;
+  get('snooze').hidden = !ringing;
+  if (data.wallpaper) {
+    stage.style.setProperty('--wallpaper', 'url("' + data.wallpaper + '")');
+  } else {
+    stage.style.removeProperty('--wallpaper');
+  }
+  if (ringing && unlocked && ringingAttempt !== data.attempt) {
+    ringingAttempt = data.attempt;
+    ringtone.play().catch(() => {
+      unlocked = false;
+      enable.hidden = false;
+      ringingAttempt = undefined;
+    });
+  } else if (!ringing) {
+    stopRing();
+    ringingAttempt = undefined;
+  }
+  if (activeAttempt && !playing && !busy) {
+    recording.pause();
+    activeAttempt = undefined;
+  }
+}
+
+async function poll() {
+  if (!key || polling || busy) return;
+  polling = true;
+  try {
+    if (pendingFinish) {
+      try {
+        await send('ended', pendingFinish);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+      }
+      pendingFinish = null;
+      sessionStorage.removeItem(finishKey);
+    }
+    if (failedAttempt) {
+      try {
+        await send('failed', failedAttempt);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+      }
+      failedAttempt = undefined;
+    }
+    if (activeAttempt && Date.now() - lastHeartbeat >= 10000) {
+      try {
+        await send('heartbeat', activeAttempt);
+        lastHeartbeat = Date.now();
+      } catch (error) {
+        if (error.status !== 409) throw error;
+      }
+    }
+    const next = await request('state');
+    if (!busy) render(next);
+    if (notice.dataset.connection === 'true') {
+      showNotice('');
+      delete notice.dataset.connection;
+    }
+  } catch (error) {
+    notice.dataset.connection = 'true';
+    showNotice(error.status === 401 ? error.message : 'Conexión interrumpida. Reconectando…');
+  } finally {
+    polling = false;
+  }
+}
+
+async function respond(action) {
+  if (busy || snapshot?.phase !== 'ringing') return;
+  busy = true;
+  showNotice('');
+  const { attempt, audio } = snapshot;
+  if (action === 'answer') stopRing();
+  try {
+    await send(action, attempt);
+    if (action === 'answer') {
+      activeAttempt = attempt;
+      lastHeartbeat = Date.now();
+      render({ ...snapshot, phase: 'playing' });
+      recording.src = audio;
+      try {
+        await recording.play();
+      } catch {
+        failedAttempt = attempt;
+        activeAttempt = undefined;
+        showNotice('No se pudo reproducir el audio. Pide al admin que vuelva a llamar.');
+      }
+    }
+  } catch (error) {
+    showNotice(error.message);
+    if (action === 'answer') ringingAttempt = undefined;
+  } finally {
+    busy = false;
+    await poll();
+  }
+}
+
+ringtone.volume = .55;
+enable.addEventListener('click', async () => {
+  try {
+    await ringtone.play();
+    unlocked = true;
+    enable.hidden = true;
+    if (snapshot?.phase === 'ringing') ringingAttempt = snapshot.attempt;
+    else stopRing();
+  } catch {
+    showNotice('El navegador bloqueó el sonido. Vuelve a pulsar Activar sonido.');
+  }
+});
+get('answer').addEventListener('click', () => respond('answer'));
+get('reject').addEventListener('click', () => respond('reject'));
+get('snooze').addEventListener('click', () => respond('snooze'));
+recording.addEventListener('timeupdate', () => { if (activeAttempt) updateTimer(); });
+recording.addEventListener('ended', () => {
+  if (!activeAttempt) return;
+  pendingFinish = activeAttempt;
+  activeAttempt = undefined;
+  sessionStorage.setItem(finishKey, pendingFinish);
+  poll();
+});
+recording.addEventListener('error', () => {
+  if (!activeAttempt) return;
+  failedAttempt = activeAttempt;
+  activeAttempt = undefined;
+  showNotice('No se pudo reproducir el audio. Pide al admin que vuelva a llamar.');
+  poll();
+});
+const fullscreen = get('fullscreen');
+fullscreen.addEventListener('click', async () => {
+  try {
+    if (document.fullscreenElement) await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
+  } catch {
+    fullscreen.textContent = 'Pantalla completa con F11';
+  }
+});
+document.addEventListener('fullscreenchange', () => {
+  fullscreen.textContent = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
+});
+if (key) {
+  poll();
+  setInterval(poll, 900);
+} else {
+  enable.hidden = true;
+  showNotice('Abre el enlace de proyección desde Administración.');
+}
