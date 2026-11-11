@@ -9,6 +9,7 @@ Simulador de llamadas entrantes con un panel de administración y una pantalla d
 3. Abre la pantalla de usuario desde Administración. En el computador conectado al proyector, pulsa **Activar sonido** una vez y, si quieres, **Pantalla completa**.
 4. Pulsa **Lanzar siguiente llamada** desde Administración. La pantalla puede contestar, rechazar o posponer. Posponer hace que la misma llamada vuelva a sonar tras 5 segundos. Si se rechaza, el admin puede volver a llamar.
 5. Cuando el navegador confirma que terminó la grabación, se marca como reproducida. La lista queda en espera hasta que el admin lance la siguiente llamada.
+6. Después de un ensayo, pulsa **Volver a empezar** en Administración para dejar todas las grabaciones pendientes en su orden actual.
 
 La pantalla de proyección descarga la próxima grabación completa antes de habilitar la llamada. Mantén abierta esa pantalla y espera el aviso de que la grabación está lista. Si la conexión se interrumpe durante la reproducción, el archivo local puede terminar y la confirmación se envía al reconectar.
 

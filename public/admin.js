@@ -73,6 +73,7 @@ function render(data) {
   preparation.hidden = !prep || ['ringing', 'snoozed'].includes(data.phase);
   preparation.textContent = prep ? (prep.ready ? 'Lista en el proyector: ' : 'Esperando descarga en el proyector: ') + prep.name : '';
   get('launch').disabled = playing || !prep?.ready;
+  get('reset').disabled = playing || (!data.activeId && pending.length === data.tracks.length);
   get('launch').textContent = ['rejected', 'interrupted'].includes(data.phase) && pending[0]?.id === data.activeId
     ? 'Volver a llamar' : 'Lanzar siguiente llamada';
   get('empty').hidden = data.tracks.length > 0;
@@ -158,6 +159,13 @@ get('login').addEventListener('submit', event => {
 });
 get('logout').addEventListener('click', () => { logout(); feedback(''); });
 get('launch').addEventListener('click', () => task(() => post('launch')));
+get('reset').addEventListener('click', () => {
+  if (busy || !window.confirm('¿Volver a empezar? Todas las grabaciones quedarán pendientes en el orden actual.')) return;
+  task(async () => {
+    await post('reset');
+    feedback('Todas las grabaciones están pendientes. La próxima llamada será la primera de la lista.');
+  });
+});
 function setupUpload(kind, form, input, nameInput) {
   input.addEventListener('change', () => {
     const count = input.files.length;

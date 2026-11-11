@@ -155,6 +155,19 @@ async function launch(db, room) {
   return { ok: true };
 }
 
+async function resetQueue(db, room) {
+  if (['ringing', 'playing', 'snoozed'].includes(room.phase)) {
+    throw new HttpError(409, 'Espera a que termine la llamada para volver a empezar.');
+  }
+  await db.query('UPDATE tracks SET played_at = NULL, played_attempt = NULL WHERE played_at IS NOT NULL');
+  await db.query(`
+    UPDATE room SET track_id = NULL, attempt = NULL, phase = 'waiting',
+      deadline = NULL, prepared_media = NULL, prepared_until = NULL
+    WHERE id = 1
+  `);
+  return { ok: true };
+}
+
 async function screenAction(db, room, body) {
   const { action, attempt } = body ?? {};
   if (!uuid.test(attempt || '')) throw new HttpError(400, 'Identificador de llamada inválido.');
@@ -336,6 +349,7 @@ async function route(req, res) {
     if (!hasKey(req, APP_ADMIN_KEY)) throw new HttpError(401, 'Clave de administración incorrecta.');
     if (method === 'GET' && path === '/api/admin/state') return json(res, 200, await withRoom((db, room) => state(db, room, true)));
     if (method === 'POST' && path === '/api/admin/launch') return json(res, 200, await withRoom(launch));
+    if (method === 'POST' && path === '/api/admin/reset') return json(res, 200, await withRoom(resetQueue));
     if (method === 'POST' && path === '/api/admin/move') {
       const { id, direction } = await readJson(req) ?? {};
       return json(res, 200, await withRoom((db, room) => moveTrack(db, room, id, direction)));
