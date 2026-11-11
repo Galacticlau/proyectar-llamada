@@ -119,7 +119,7 @@ function render(data) {
   stage.dataset.mode = ringing ? 'ringing' : playing ? 'active' : data.phase;
   stage.dataset.videoPlaying = videoPlaying;
   videoRecording.hidden = !videoPlaying;
-  get('caller').textContent = data.name || 'En espera';
+  get('caller').textContent = data.name || data.roomName || 'En espera';
   if (playing) updateTimer();
   else if (ringing && !ready) status.textContent = 'Preparando grabación…';
   else status.textContent = ringing && data.kind === 'video' ? 'Videollamada entrante' : labels[data.phase];

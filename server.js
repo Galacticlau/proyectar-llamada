@@ -9,7 +9,20 @@ const { DATABASE_URL, APP_ADMIN_KEY, PORT = '3000', HOST = '0.0.0.0' } = process
 if (!DATABASE_URL || !APP_ADMIN_KEY || APP_ADMIN_KEY.length < 16) {
   throw new Error('Configura DATABASE_URL y APP_ADMIN_KEY (16 caracteres o más).');
 }
-const screenKey = createHmac('sha256', APP_ADMIN_KEY).update('pantalla').digest('base64url');
+const rooms = [
+  { id: 1, name: 'Sala anterior', adminKey: APP_ADMIN_KEY },
+  ...['A', 'B', 'C'].map((letter, index) => ({
+    id: index + 2, name: '4° Medio ' + letter, adminKey: process.env['APP_ADMIN_KEY_4' + letter]
+  }))
+].filter(room => room.adminKey);
+const adminKeys = new Set(rooms.map(room => room.adminKey));
+if (adminKeys.size !== rooms.length || rooms.some(room => room.adminKey.length < 16)) {
+  throw new Error('Cada sala debe tener una clave distinta de al menos 16 caracteres.');
+}
+for (const room of rooms) {
+  room.screenKey = createHmac('sha256', room.adminKey).update('pantalla').digest('base64url');
+}
+const roomsById = new Map(rooms.map(room => [room.id, room]));
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const audioTypes = new Map(Object.entries({
@@ -76,20 +89,20 @@ function nameFrom(value) {
   return name;
 }
 
-// Todas las acciones de la cola adquieren el mismo bloqueo. Dos clics simultáneos
+// Las acciones de una sala adquieren el bloqueo de su cola. Dos clics simultáneos
 // se resuelven en orden y una respuesta atrasada no afecta a otro intento.
-async function withRoom(action) {
+async function withRoom(roomId, action) {
   const db = await pool.connect();
   try {
     await db.query('BEGIN');
-    await db.query('SELECT id FROM room WHERE id = 1 FOR UPDATE');
+    await db.query('SELECT id FROM room WHERE id = $1 FOR UPDATE', [roomId]);
     await db.query(`
       UPDATE room SET phase = CASE phase WHEN 'snoozed' THEN 'ringing' ELSE 'interrupted' END,
         attempt = CASE phase WHEN 'snoozed' THEN gen_random_uuid() ELSE attempt END,
         deadline = NULL
-      WHERE id = 1 AND deadline <= now() AND phase IN ('snoozed', 'playing')
-    `);
-    const { rows: [room] } = await db.query('SELECT * FROM room WHERE id = 1');
+      WHERE id = $1 AND deadline <= now() AND phase IN ('snoozed', 'playing')
+    `, [roomId]);
+    const { rows: [room] } = await db.query('SELECT * FROM room WHERE id = $1', [roomId]);
     const data = await action(db, room);
     await db.query('COMMIT');
     return data;
@@ -104,9 +117,9 @@ async function withRoom(action) {
 async function nextTrack(db, room) {
   const { rows: [track] } = await db.query(`
     SELECT id, media_id, name FROM tracks
-    WHERE played_at IS NULL AND id IS DISTINCT FROM $1::uuid
+    WHERE room_id = $1 AND played_at IS NULL AND id IS DISTINCT FROM $2::uuid
     ORDER BY position LIMIT 1
-  `, [room.phase === 'playing' ? room.track_id : null]);
+  `, [room.id, room.phase === 'playing' ? room.track_id : null]);
   return track;
 }
 
@@ -116,10 +129,12 @@ function isPrepared(room, track) {
 
 async function state(db, room, admin) {
   const { rows: [active] } = await db.query(
-    'SELECT tracks.name, tracks.media_id, media.object_key FROM tracks JOIN media ON media.id = tracks.media_id WHERE tracks.id = $1',
-    [room.track_id]);
+    'SELECT tracks.name, tracks.media_id, media.object_key FROM tracks JOIN media ON media.id = tracks.media_id WHERE tracks.id = $1 AND tracks.room_id = $2',
+    [room.track_id, room.id]);
   const next = await nextTrack(db, room);
+  const config = roomsById.get(room.id);
   const output = {
+    roomName: config.name,
     phase: room.phase, attempt: room.attempt, deadline: room.deadline,
     name: active?.name ?? null,
     audio: active ? '/media/' + active.media_id : null,
@@ -132,11 +147,11 @@ async function state(db, room, admin) {
     const { rows } = await db.query(`
       SELECT tracks.id, name, position, media_id, played_at,
         CASE WHEN media.object_key IS NULL THEN 'audio' ELSE 'video' END AS kind
-      FROM tracks JOIN media ON media.id = tracks.media_id ORDER BY position
-    `);
+      FROM tracks JOIN media ON media.id = tracks.media_id WHERE tracks.room_id = $1 ORDER BY position
+    `, [room.id]);
     output.tracks = rows;
     output.videoEnabled = Boolean(videoStorage);
-    output.screenPath = '/pantalla#' + screenKey;
+    output.screenPath = '/pantalla#' + config.screenKey;
     output.activeId = room.track_id;
     output.preparation = next ? { name: next.name, ready: isPrepared(room, next) } : null;
   }
@@ -150,8 +165,8 @@ async function launch(db, room) {
   const next = await nextTrack(db, room);
   if (!next) throw new HttpError(409, 'Ya se reprodujeron todas las grabaciones de la lista.');
   if (!isPrepared(room, next)) throw new HttpError(409, 'La pantalla de proyección todavía está preparando la próxima grabación.');
-  await db.query("UPDATE room SET track_id = $1, attempt = $2, phase = 'ringing', deadline = NULL WHERE id = 1",
-    [next.id, randomUUID()]);
+  await db.query("UPDATE room SET track_id = $1, attempt = $2, phase = 'ringing', deadline = NULL WHERE id = $3",
+    [next.id, randomUUID(), room.id]);
   return { ok: true };
 }
 
@@ -159,12 +174,12 @@ async function resetQueue(db, room) {
   if (['ringing', 'playing', 'snoozed'].includes(room.phase)) {
     throw new HttpError(409, 'Espera a que termine la llamada para volver a empezar.');
   }
-  await db.query('UPDATE tracks SET played_at = NULL, played_attempt = NULL WHERE played_at IS NOT NULL');
+  await db.query('UPDATE tracks SET played_at = NULL, played_attempt = NULL WHERE room_id = $1 AND played_at IS NOT NULL', [room.id]);
   await db.query(`
     UPDATE room SET track_id = NULL, attempt = NULL, phase = 'waiting',
       deadline = NULL, prepared_media = NULL, prepared_until = NULL
-    WHERE id = 1
-  `);
+    WHERE id = $1
+  `, [room.id]);
   return { ok: true };
 }
 
@@ -172,28 +187,28 @@ async function screenAction(db, room, body) {
   const { action, attempt } = body ?? {};
   if (!uuid.test(attempt || '')) throw new HttpError(400, 'Identificador de llamada inválido.');
   if (action === 'ended') {
-    const { rowCount } = await db.query('SELECT 1 FROM tracks WHERE played_attempt = $1', [attempt]);
+    const { rowCount } = await db.query('SELECT 1 FROM tracks WHERE played_attempt = $1 AND room_id = $2', [attempt, room.id]);
     if (rowCount) return { ok: true };
   }
   if (room.attempt !== attempt) throw new HttpError(409, 'La llamada cambió.');
   if (room.phase === 'ringing') {
     if (action === 'answer') {
-      await db.query("UPDATE room SET phase = 'playing', deadline = now() + interval '45 seconds' WHERE id = 1");
+      await db.query("UPDATE room SET phase = 'playing', deadline = now() + interval '45 seconds' WHERE id = $1", [room.id]);
     } else if (action === 'reject') {
-      await db.query("UPDATE room SET phase = 'rejected', deadline = NULL WHERE id = 1");
+      await db.query("UPDATE room SET phase = 'rejected', deadline = NULL WHERE id = $1", [room.id]);
     } else if (action === 'snooze') {
-      await db.query("UPDATE room SET phase = 'snoozed', deadline = now() + interval '5 seconds' WHERE id = 1");
+      await db.query("UPDATE room SET phase = 'snoozed', deadline = now() + interval '5 seconds' WHERE id = $1", [room.id]);
     } else {
       throw new HttpError(409, 'La llamada está sonando.');
     }
   } else if (['playing', 'interrupted'].includes(room.phase) && action === 'heartbeat') {
-    await db.query("UPDATE room SET phase = 'playing', deadline = now() + interval '45 seconds' WHERE id = 1");
+    await db.query("UPDATE room SET phase = 'playing', deadline = now() + interval '45 seconds' WHERE id = $1", [room.id]);
   } else if (['playing', 'interrupted'].includes(room.phase) && action === 'ended') {
-    await db.query('UPDATE tracks SET played_at = now(), played_attempt = $2 WHERE id = $1 AND played_at IS NULL',
-      [room.track_id, attempt]);
-    await db.query("UPDATE room SET phase = 'waiting', track_id = NULL, attempt = NULL, deadline = NULL WHERE id = 1");
+    await db.query('UPDATE tracks SET played_at = now(), played_attempt = $2 WHERE id = $1 AND room_id = $3 AND played_at IS NULL',
+      [room.track_id, attempt, room.id]);
+    await db.query("UPDATE room SET phase = 'waiting', track_id = NULL, attempt = NULL, deadline = NULL WHERE id = $1", [room.id]);
   } else if (room.phase === 'playing' && action === 'failed') {
-    await db.query("UPDATE room SET phase = 'interrupted', deadline = NULL WHERE id = 1");
+    await db.query("UPDATE room SET phase = 'interrupted', deadline = NULL WHERE id = $1", [room.id]);
   } else {
     throw new HttpError(409, 'Esta acción ya no está disponible.');
   }
@@ -203,18 +218,18 @@ async function screenAction(db, room, body) {
 async function moveTrack(db, room, id, direction) {
   if (!uuid.test(id || '') || !['up', 'down'].includes(direction)) throw new HttpError(400, 'Movimiento inválido.');
   if (['ringing', 'playing', 'snoozed'].includes(room.phase)) throw new HttpError(409, 'Espera a que termine la llamada.');
-  const { rows } = await db.query('SELECT id, position FROM tracks WHERE played_at IS NULL ORDER BY position');
+  const { rows } = await db.query('SELECT id, position FROM tracks WHERE room_id = $1 AND played_at IS NULL ORDER BY position', [room.id]);
   const index = rows.findIndex(track => track.id === id);
   const other = rows[index + (direction === 'up' ? -1 : 1)];
   if (index < 0 || !other) throw new HttpError(409, 'No se puede mover este audio.');
   const current = rows[index];
-  await db.query('UPDATE tracks SET position = (SELECT max(position) + 1 FROM tracks) WHERE id = $1', [current.id]);
+  await db.query('UPDATE tracks SET position = (SELECT max(position) + 1 FROM tracks WHERE room_id = $2) WHERE id = $1', [current.id, room.id]);
   await db.query('UPDATE tracks SET position = $2 WHERE id = $1', [other.id, current.position]);
   await db.query('UPDATE tracks SET position = $2 WHERE id = $1', [current.id, other.position]);
   return { ok: true };
 }
 
-async function upload(req, url, kind) {
+async function upload(req, url, kind, roomId) {
   const extension = url.searchParams.get('extension')?.toLowerCase();
   const audio = kind === 'audio';
   const video = kind === 'video';
@@ -229,28 +244,30 @@ async function upload(req, url, kind) {
   if (video && (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp')) {
     throw new HttpError(415, 'El archivo debe ser un video MP4 válido.');
   }
-  const digest = createHash('sha256').update(mime).update(bytes).digest('hex');
+  const hash = createHash('sha256');
+  if (roomId !== 1) hash.update('room:' + roomId + '\0');
+  const digest = hash.update(mime).update(bytes).digest('hex');
   const objectKey = video ? 'videos/' + digest + '.mp4' : null;
   if (video) {
     const { rowCount } = await pool.query('SELECT 1 FROM media WHERE digest = $1', [digest]);
     if (!rowCount) await videoStorage.put(objectKey, bytes);
   }
-  return withRoom(async db => {
+  return withRoom(roomId, async db => {
     await db.query('INSERT INTO media (id, mime, bytes, digest, object_key) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (digest) DO NOTHING',
       [randomUUID(), mime, video ? Buffer.alloc(0) : bytes, digest, objectKey]);
     const { rows: [{ id }] } = await db.query('SELECT id FROM media WHERE digest = $1', [digest]);
     if (!audio && !video) {
-      await db.query('UPDATE room SET wallpaper = $1 WHERE id = 1', [id]);
+      await db.query('UPDATE room SET wallpaper = $1 WHERE id = $2', [id, roomId]);
       return { url: '/media/' + id };
     }
     const { rows: [created] } = await db.query(`
-      INSERT INTO tracks (id, media_id, name, position)
-      SELECT $1, $2, $3, coalesce(max(position), 0) + 1 FROM tracks
+      INSERT INTO tracks (id, media_id, name, position, room_id)
+      SELECT $1, $2, $3, coalesce(max(position), 0) + 1, $4 FROM tracks WHERE room_id = $4
       ON CONFLICT (media_id) DO NOTHING
       RETURNING name, position, played_at
-    `, [randomUUID(), id, name]);
+    `, [randomUUID(), id, name, roomId]);
     const track = created ?? (await db.query(
-      'SELECT name, position, played_at FROM tracks WHERE media_id = $1', [id]
+      'SELECT name, position, played_at FROM tracks WHERE media_id = $1 AND room_id = $2', [id, roomId]
     )).rows[0];
     return { url: '/media/' + id, alreadyAdded: !created, track };
   });
@@ -292,13 +309,13 @@ async function media(req, res, id) {
   res.writeHead(range ? 206 : 200, headers).end(part.bytes);
 }
 
-async function preload(req, res, id) {
+async function preload(req, res, id, roomId) {
   if (!uuid.test(id)) throw new HttpError(404, 'Grabación no encontrada.');
   const { rows: [file] } = await pool.query(`
     SELECT media.mime, media.object_key, media.bytes
     FROM media JOIN tracks ON tracks.media_id = media.id
-    WHERE media.id = $1 AND tracks.played_at IS NULL
-  `, [id]);
+    WHERE media.id = $1 AND tracks.room_id = $2 AND tracks.played_at IS NULL
+  `, [id, roomId]);
   if (!file) throw new HttpError(404, 'Grabación no encontrada.');
   if (!file.object_key) {
     res.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': file.bytes.length }).end(file.bytes);
@@ -318,7 +335,7 @@ async function markPrepared(db, room, id) {
   if (!uuid.test(id || '')) throw new HttpError(400, 'Grabación inválida.');
   const next = await nextTrack(db, room);
   if (next?.media_id !== id) throw new HttpError(409, 'La próxima grabación cambió.');
-  await db.query("UPDATE room SET prepared_media = $1, prepared_until = now() + interval '15 seconds' WHERE id = 1", [id]);
+  await db.query("UPDATE room SET prepared_media = $1, prepared_until = now() + interval '15 seconds' WHERE id = $2", [id, room.id]);
   return { ok: true };
 }
 
@@ -346,36 +363,40 @@ async function route(req, res) {
     return media(req, res, path.slice('/media/'.length));
   }
   if (path.startsWith('/api/admin/')) {
-    if (!hasKey(req, APP_ADMIN_KEY)) throw new HttpError(401, 'Clave de administración incorrecta.');
-    if (method === 'GET' && path === '/api/admin/state') return json(res, 200, await withRoom((db, room) => state(db, room, true)));
-    if (method === 'POST' && path === '/api/admin/launch') return json(res, 200, await withRoom(launch));
-    if (method === 'POST' && path === '/api/admin/reset') return json(res, 200, await withRoom(resetQueue));
+    const config = rooms.find(room => hasKey(req, room.adminKey));
+    if (!config) throw new HttpError(401, 'Clave de administración incorrecta.');
+    const roomId = config.id;
+    if (method === 'GET' && path === '/api/admin/state') return json(res, 200, await withRoom(roomId, (db, room) => state(db, room, true)));
+    if (method === 'POST' && path === '/api/admin/launch') return json(res, 200, await withRoom(roomId, launch));
+    if (method === 'POST' && path === '/api/admin/reset') return json(res, 200, await withRoom(roomId, resetQueue));
     if (method === 'POST' && path === '/api/admin/move') {
       const { id, direction } = await readJson(req) ?? {};
-      return json(res, 200, await withRoom((db, room) => moveTrack(db, room, id, direction)));
+      return json(res, 200, await withRoom(roomId, (db, room) => moveTrack(db, room, id, direction)));
     }
     if (method === 'POST' && path === '/api/admin/rename') {
       const { id, name } = await readJson(req) ?? {};
       if (!uuid.test(id || '')) throw new HttpError(400, 'Identificador inválido.');
-      const updated = await pool.query('UPDATE tracks SET name = $2 WHERE id = $1', [id, nameFrom(name)]);
+      const updated = await pool.query('UPDATE tracks SET name = $2 WHERE id = $1 AND room_id = $3', [id, nameFrom(name), roomId]);
       if (!updated.rowCount) throw new HttpError(404, 'Audio no encontrado.');
       return json(res, 200, { ok: true });
     }
-    if (method === 'POST' && path === '/api/admin/audio') return json(res, 201, await upload(req, url, 'audio'));
-    if (method === 'POST' && path === '/api/admin/video') return json(res, 201, await upload(req, url, 'video'));
-    if (method === 'POST' && path === '/api/admin/background') return json(res, 201, await upload(req, url, 'background'));
+    if (method === 'POST' && path === '/api/admin/audio') return json(res, 201, await upload(req, url, 'audio', roomId));
+    if (method === 'POST' && path === '/api/admin/video') return json(res, 201, await upload(req, url, 'video', roomId));
+    if (method === 'POST' && path === '/api/admin/background') return json(res, 201, await upload(req, url, 'background', roomId));
   }
   if (path.startsWith('/api/screen/')) {
-    if (!hasKey(req, screenKey)) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
-    if (method === 'GET' && path === '/api/screen/state') return json(res, 200, await withRoom((db, room) => state(db, room, false)));
-    if (method === 'GET' && path.startsWith('/api/screen/preload/')) return preload(req, res, path.slice('/api/screen/preload/'.length));
+    const config = rooms.find(room => hasKey(req, room.screenKey));
+    if (!config) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
+    const roomId = config.id;
+    if (method === 'GET' && path === '/api/screen/state') return json(res, 200, await withRoom(roomId, (db, room) => state(db, room, false)));
+    if (method === 'GET' && path.startsWith('/api/screen/preload/')) return preload(req, res, path.slice('/api/screen/preload/'.length), roomId);
     if (method === 'POST' && path === '/api/screen/prepared') {
       const body = await readJson(req);
-      return json(res, 200, await withRoom((db, room) => markPrepared(db, room, body?.mediaId)));
+      return json(res, 200, await withRoom(roomId, (db, room) => markPrepared(db, room, body?.mediaId)));
     }
     if (method === 'POST' && path === '/api/screen/action') {
       const body = await readJson(req);
-      return json(res, 200, await withRoom((db, room) => screenAction(db, room, body)));
+      return json(res, 200, await withRoom(roomId, (db, room) => screenAction(db, room, body)));
     }
   }
   throw new HttpError(404, 'Página no encontrada.');
@@ -398,6 +419,7 @@ createServer((req, res) => route(req, res).catch(error => {
   json(res, error.status || 500, { error: error.status ? error.message : 'Error del servidor. Vuelve a intentar.' });
 })).listen(Number(PORT), HOST, () => {
   console.log('Llamada para proyectar lista.');
+  console.log('Salas disponibles: ' + rooms.map(room => room.name).join(', '));
   videoStorage?.check()
     .then(() => console.log('Bucket de videos accesible.'))
     .catch(error => console.warn('No se pudo verificar el bucket de videos:', error.name));

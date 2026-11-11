@@ -23,6 +23,7 @@ Requiere Node.js 22 o superior y PostgreSQL. En Railway, conecta este repositori
 
 - `DATABASE_URL`, con la referencia al servicio PostgreSQL, por ejemplo `${{Postgres.DATABASE_URL}}`.
 - `APP_ADMIN_KEY`, una clave aleatoria de al menos 16 caracteres. Cambiarla también cambia el enlace de proyección.
+- `APP_ADMIN_KEY_4A`, `APP_ADMIN_KEY_4B` y `APP_ADMIN_KEY_4C`, claves distintas de al menos 16 caracteres para las tres salas de 4° Medio. Cada clave abre su propia lista, fondo y pantalla de proyección. La clave anterior sigue abriendo la sala que contiene las grabaciones previas.
 - Para habilitar videos, referencia el bucket privado con `VIDEO_BUCKET`, `VIDEO_ENDPOINT`, `VIDEO_REGION`, `VIDEO_ACCESS_KEY_ID` y `VIDEO_SECRET_ACCESS_KEY`. Define `VIDEO_PATH_STYLE=true` si el servidor S3 requiere URLs por ruta.
 
 Railway provee `PORT`. La aplicación usa `npm start` y prepara el esquema al arrancar. PostgreSQL guarda la cola, los audios, el fondo y las referencias a los videos. El bucket guarda los MP4. Para desarrollo local, configura las mismas variables y ejecuta `npm ci` y `npm start`.

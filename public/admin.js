@@ -39,6 +39,7 @@ function logout() {
   key = '';
   sessionStorage.removeItem('llamada-admin');
   lastView = '';
+  get('title').textContent = 'Llamada para proyectar';
   togglePanel(false);
 }
 
@@ -58,6 +59,7 @@ function post(path, data) {
 
 function render(data) {
   togglePanel(true);
+  get('title').textContent = data.roomName;
   get('screen').href = data.screenPath;
   get('video-upload').hidden = !data.videoEnabled;
   const signature = JSON.stringify(data);
