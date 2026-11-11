@@ -24,6 +24,11 @@ let pendingFinish = sessionStorage.getItem(finishKey);
 let busy = false;
 let polling = false;
 let lastHeartbeat = 0;
+const prepared = new Map();
+let download;
+let retryAfter = 0;
+let confirmedMedia;
+let confirmedAt = 0;
 
 async function request(path, options = {}) {
   const response = await fetch('/api/screen/' + path, {
@@ -41,6 +46,53 @@ async function request(path, options = {}) {
 function send(action, attempt) {
   return request('action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, attempt }) });
+}
+
+function prepare(mediaId) {
+  if (download?.id !== mediaId) {
+    download?.controller.abort();
+    download = undefined;
+  }
+  if (!mediaId || prepared.has(mediaId) || download || Date.now() < retryAfter) return;
+  const current = { id: mediaId, controller: new AbortController() };
+  download = current;
+  fetch('/api/screen/preload/' + mediaId, { headers, signal: current.controller.signal })
+    .then(response => {
+      if (!response.ok) throw new Error('Descarga no disponible');
+      return response.blob();
+    })
+    .then(blob => {
+      if (download !== current) return;
+      if (!blob.size) throw new Error('Descarga vacía');
+      prepared.set(mediaId, URL.createObjectURL(blob));
+      for (const [id, url] of prepared) {
+        if (prepared.size <= 2) break;
+        if (id !== mediaId && (!activeAttempt || url !== activeMedia.src)) {
+          URL.revokeObjectURL(url);
+          prepared.delete(id);
+        }
+      }
+    })
+    .catch(() => {
+      if (download === current) retryAfter = Date.now() + 3000;
+    })
+    .finally(() => {
+      if (download !== current) return;
+      download = undefined;
+      poll();
+    });
+}
+
+async function confirmPrepared(mediaId) {
+  if (!prepared.has(mediaId) || (confirmedMedia === mediaId && Date.now() - confirmedAt < 4500)) return;
+  try {
+    await request('prepared', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mediaId }) });
+    confirmedMedia = mediaId;
+    confirmedAt = Date.now();
+  } catch (error) {
+    if (error.status !== 409) throw error;
+  }
 }
 
 function showNotice(message) {
@@ -61,15 +113,18 @@ function updateTimer() {
 function render(data) {
   snapshot = data;
   const ringing = data.phase === 'ringing';
-  const playing = data.phase === 'playing' && activeAttempt === data.attempt;
+  const ready = ringing && prepared.has(data.mediaId);
+  const playing = ['playing', 'interrupted'].includes(data.phase) && activeAttempt === data.attempt;
   const videoPlaying = playing && data.kind === 'video';
   stage.dataset.mode = ringing ? 'ringing' : playing ? 'active' : data.phase;
   stage.dataset.videoPlaying = videoPlaying;
   videoRecording.hidden = !videoPlaying;
   get('caller').textContent = data.name || 'En espera';
   if (playing) updateTimer();
+  else if (ringing && !ready) status.textContent = 'Preparando grabación…';
   else status.textContent = ringing && data.kind === 'video' ? 'Videollamada entrante' : labels[data.phase];
   get('ring-actions').hidden = !ringing;
+  get('answer').disabled = !ready;
   get('dots').hidden = !ringing;
   get('wave').hidden = !playing || videoPlaying;
   get('snooze').hidden = !ringing;
@@ -78,14 +133,14 @@ function render(data) {
   } else {
     stage.style.removeProperty('--wallpaper');
   }
-  if (ringing && unlocked && ringingAttempt !== data.attempt) {
+  if (ready && unlocked && ringingAttempt !== data.attempt) {
     ringingAttempt = data.attempt;
     ringtone.play().catch(() => {
       unlocked = false;
       enable.hidden = false;
       ringingAttempt = undefined;
     });
-  } else if (!ringing) {
+  } else if (!ready) {
     stopRing();
     ringingAttempt = undefined;
   }
@@ -125,14 +180,20 @@ async function poll() {
       }
     }
     const next = await request('state');
-    if (!busy) render(next);
+    if (!busy) {
+      render(next);
+      prepare(next.phase === 'ringing' ? next.mediaId : next.nextMedia);
+      await confirmPrepared(next.nextMedia);
+    }
     if (notice.dataset.connection === 'true') {
       showNotice('');
       delete notice.dataset.connection;
     }
   } catch (error) {
-    notice.dataset.connection = 'true';
-    showNotice(error.status === 401 ? error.message : 'Conexión interrumpida. Reconectando…');
+    if (!activeAttempt) {
+      notice.dataset.connection = 'true';
+      showNotice(error.status === 401 ? error.message : 'Conexión interrumpida. Reconectando…');
+    }
   } finally {
     polling = false;
   }
@@ -142,7 +203,12 @@ async function respond(action) {
   if (busy || snapshot?.phase !== 'ringing') return;
   busy = true;
   showNotice('');
-  const { attempt, audio, kind } = snapshot;
+  const { attempt, mediaId, kind } = snapshot;
+  const localUrl = prepared.get(mediaId);
+  if (action === 'answer' && !localUrl) {
+    busy = false;
+    return;
+  }
   if (action === 'answer') stopRing();
   try {
     await send(action, attempt);
@@ -151,7 +217,7 @@ async function respond(action) {
       activeMedia = kind === 'video' ? videoRecording : recording;
       lastHeartbeat = Date.now();
       render({ ...snapshot, phase: 'playing' });
-      activeMedia.src = audio;
+      activeMedia.src = localUrl;
       try {
         await activeMedia.play();
       } catch {
@@ -173,7 +239,7 @@ enable.addEventListener('click', async () => {
     await ringtone.play();
     unlocked = true;
     enable.hidden = true;
-    if (snapshot?.phase === 'ringing') ringingAttempt = snapshot.attempt;
+    if (snapshot?.phase === 'ringing' && prepared.has(snapshot.mediaId)) ringingAttempt = snapshot.attempt;
     else stopRing();
   } catch {
     showNotice('El navegador bloqueó el sonido. Vuelve a pulsar Activar sonido.');
@@ -186,6 +252,7 @@ function finishPlayback() {
   pendingFinish = activeAttempt;
   activeAttempt = undefined;
   sessionStorage.setItem(finishKey, pendingFinish);
+  render({ ...snapshot, phase: 'waiting', name: null, attempt: null });
   poll();
 }
 

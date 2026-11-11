@@ -10,6 +10,8 @@ Simulador de llamadas entrantes con un panel de administración y una pantalla d
 4. Pulsa **Lanzar siguiente llamada** desde Administración. La pantalla puede contestar, rechazar o posponer. Posponer hace que la misma llamada vuelva a sonar tras 5 segundos. Si se rechaza, el admin puede volver a llamar.
 5. Cuando el navegador confirma que terminó la grabación, se marca como reproducida. La lista queda en espera hasta que el admin lance la siguiente llamada.
 
+La pantalla de proyección descarga la próxima grabación completa antes de habilitar la llamada. Mantén abierta esa pantalla y espera el aviso de que la grabación está lista. Si la conexión se interrumpe durante la reproducción, el archivo local puede terminar y la confirmación se envía al reconectar.
+
 Para una videollamada, carga un MP4 de hasta 64 MB en **Cargar videos**. Los videos comparten la lista con los audios y aparecen dentro del teléfono al contestar. Los enlaces directos a videos usan una dirección estable que genera un acceso temporal al archivo.
 
 El enlace de proyección permite responder a las llamadas de esta sala. Cada enlace directo de audio permite escuchar esa grabación a quien lo tenga. Comparte los enlaces con las personas que deben usarlos.

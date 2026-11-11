@@ -23,4 +23,6 @@ CREATE TABLE IF NOT EXISTS room (
   deadline timestamptz,
   wallpaper uuid REFERENCES media(id)
 );
+ALTER TABLE room ADD COLUMN IF NOT EXISTS prepared_media uuid REFERENCES media(id);
+ALTER TABLE room ADD COLUMN IF NOT EXISTS prepared_until timestamptz;
 INSERT INTO room (id) VALUES (1) ON CONFLICT DO NOTHING;

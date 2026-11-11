@@ -1,6 +1,7 @@
 import { createServer } from 'node:http';
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
+import { pipeline } from 'node:stream/promises';
 import pg from 'pg';
 import { videoStorage } from './video-storage.js';
 
@@ -100,14 +101,30 @@ async function withRoom(action) {
   }
 }
 
+async function nextTrack(db, room) {
+  const { rows: [track] } = await db.query(`
+    SELECT id, media_id, name FROM tracks
+    WHERE played_at IS NULL AND id IS DISTINCT FROM $1::uuid
+    ORDER BY position LIMIT 1
+  `, [room.phase === 'playing' ? room.track_id : null]);
+  return track;
+}
+
+function isPrepared(room, track) {
+  return Boolean(track && room.prepared_media === track.media_id && room.prepared_until > new Date());
+}
+
 async function state(db, room, admin) {
   const { rows: [active] } = await db.query(
     'SELECT tracks.name, tracks.media_id, media.object_key FROM tracks JOIN media ON media.id = tracks.media_id WHERE tracks.id = $1',
     [room.track_id]);
+  const next = await nextTrack(db, room);
   const output = {
     phase: room.phase, attempt: room.attempt, deadline: room.deadline,
     name: active?.name ?? null,
     audio: active ? '/media/' + active.media_id : null,
+    mediaId: active?.media_id ?? null,
+    nextMedia: next?.media_id ?? null,
     kind: active ? (active.object_key ? 'video' : 'audio') : null,
     wallpaper: room.wallpaper ? '/media/' + room.wallpaper : null
   };
@@ -121,6 +138,7 @@ async function state(db, room, admin) {
     output.videoEnabled = Boolean(videoStorage);
     output.screenPath = '/pantalla#' + screenKey;
     output.activeId = room.track_id;
+    output.preparation = next ? { name: next.name, ready: isPrepared(room, next) } : null;
   }
   return output;
 }
@@ -129,8 +147,9 @@ async function launch(db, room) {
   if (['ringing', 'playing', 'snoozed'].includes(room.phase)) {
     throw new HttpError(409, 'Ya hay una llamada en curso o pospuesta.');
   }
-  const { rows: [next] } = await db.query('SELECT id FROM tracks WHERE played_at IS NULL ORDER BY position LIMIT 1');
-  if (!next) throw new HttpError(409, 'Ya se reprodujeron todos los audios de la lista.');
+  const next = await nextTrack(db, room);
+  if (!next) throw new HttpError(409, 'Ya se reprodujeron todas las grabaciones de la lista.');
+  if (!isPrepared(room, next)) throw new HttpError(409, 'La pantalla de proyección todavía está preparando la próxima grabación.');
   await db.query("UPDATE room SET track_id = $1, attempt = $2, phase = 'ringing', deadline = NULL WHERE id = 1",
     [next.id, randomUUID()]);
   return { ok: true };
@@ -154,8 +173,8 @@ async function screenAction(db, room, body) {
     } else {
       throw new HttpError(409, 'La llamada está sonando.');
     }
-  } else if (room.phase === 'playing' && action === 'heartbeat') {
-    await db.query("UPDATE room SET deadline = now() + interval '45 seconds' WHERE id = 1");
+  } else if (['playing', 'interrupted'].includes(room.phase) && action === 'heartbeat') {
+    await db.query("UPDATE room SET phase = 'playing', deadline = now() + interval '45 seconds' WHERE id = 1");
   } else if (['playing', 'interrupted'].includes(room.phase) && action === 'ended') {
     await db.query('UPDATE tracks SET played_at = now(), played_attempt = $2 WHERE id = $1 AND played_at IS NULL',
       [room.track_id, attempt]);
@@ -256,6 +275,36 @@ async function media(req, res, id) {
   res.writeHead(range ? 206 : 200, headers).end(part.bytes);
 }
 
+async function preload(req, res, id) {
+  if (!uuid.test(id)) throw new HttpError(404, 'Grabación no encontrada.');
+  const { rows: [file] } = await pool.query(`
+    SELECT media.mime, media.object_key, media.bytes
+    FROM media JOIN tracks ON tracks.media_id = media.id
+    WHERE media.id = $1 AND tracks.played_at IS NULL
+  `, [id]);
+  if (!file) throw new HttpError(404, 'Grabación no encontrada.');
+  if (!file.object_key) {
+    res.writeHead(200, { 'Content-Type': file.mime, 'Content-Length': file.bytes.length }).end(file.bytes);
+    return;
+  }
+  if (!videoStorage) throw new HttpError(503, 'El almacenamiento de videos no está disponible.');
+  const controller = new AbortController();
+  res.once('close', () => { if (!res.writableFinished) controller.abort(); });
+  const object = await videoStorage.get(file.object_key, controller.signal);
+  const headers = { 'Content-Type': file.mime };
+  if (object.ContentLength !== undefined) headers['Content-Length'] = object.ContentLength;
+  res.writeHead(200, headers);
+  await pipeline(object.Body, res, { signal: controller.signal });
+}
+
+async function markPrepared(db, room, id) {
+  if (!uuid.test(id || '')) throw new HttpError(400, 'Grabación inválida.');
+  const next = await nextTrack(db, room);
+  if (next?.media_id !== id) throw new HttpError(409, 'La próxima grabación cambió.');
+  await db.query("UPDATE room SET prepared_media = $1, prepared_until = now() + interval '15 seconds' WHERE id = 1", [id]);
+  return { ok: true };
+}
+
 async function route(req, res) {
   const url = new URL(req.url, 'http://localhost');
   const { pathname: path } = url;
@@ -265,7 +314,7 @@ async function route(req, res) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
   const videoOrigin = videoStorage ? ' ' + videoStorage.origin : '';
-  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:" + videoOrigin + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data: blob:" + videoOrigin + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
 
   if (method === 'GET' && path === '/health') {
     await pool.query('SELECT 1');
@@ -301,6 +350,11 @@ async function route(req, res) {
   if (path.startsWith('/api/screen/')) {
     if (!hasKey(req, screenKey)) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
     if (method === 'GET' && path === '/api/screen/state') return json(res, 200, await withRoom((db, room) => state(db, room, false)));
+    if (method === 'GET' && path.startsWith('/api/screen/preload/')) return preload(req, res, path.slice('/api/screen/preload/'.length));
+    if (method === 'POST' && path === '/api/screen/prepared') {
+      const body = await readJson(req);
+      return json(res, 200, await withRoom((db, room) => markPrepared(db, room, body?.mediaId)));
+    }
     if (method === 'POST' && path === '/api/screen/action') {
       const body = await readJson(req);
       return json(res, 200, await withRoom((db, room) => screenAction(db, room, body)));

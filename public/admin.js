@@ -68,7 +68,11 @@ function render(data) {
   get('status').textContent = data.name ? labels[data.phase] + ' · ' + data.name
     : data.tracks.length && !pending.length ? 'Se reprodujeron todas las grabaciones.' : labels[data.phase];
   get('progress').textContent = (data.tracks.length - pending.length) + ' de ' + data.tracks.length + ' reproducidos';
-  get('launch').disabled = playing || !pending.length;
+  const prep = data.preparation;
+  const preparation = get('preparation');
+  preparation.hidden = !prep || ['ringing', 'snoozed'].includes(data.phase);
+  preparation.textContent = prep ? (prep.ready ? 'Lista en el proyector: ' : 'Esperando descarga en el proyector: ') + prep.name : '';
+  get('launch').disabled = playing || !prep?.ready;
   get('launch').textContent = ['rejected', 'interrupted'].includes(data.phase) && pending[0]?.id === data.activeId
     ? 'Volver a llamar' : 'Lanzar siguiente llamada';
   get('empty').hidden = data.tracks.length > 0;

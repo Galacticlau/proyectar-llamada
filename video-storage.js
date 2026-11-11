@@ -30,6 +30,9 @@ export const videoStorage = client ? {
       Bucket: bucket, Key: key, Body: bytes, ContentType: 'video/mp4'
     }));
   },
+  get(key, abortSignal) {
+    return client.send(new GetObjectCommand({ Bucket: bucket, Key: key }), { abortSignal });
+  },
   url(key, method) {
     const Command = method === 'HEAD' ? HeadObjectCommand : GetObjectCommand;
     return getSignedUrl(client, new Command({ Bucket: bucket, Key: key }), { expiresIn: 3600 });
