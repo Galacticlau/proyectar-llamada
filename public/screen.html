@@ -93,6 +93,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, summary:focus-v
 .display::after {
   background: linear-gradient(180deg, #141210a8, #17141238 43%, #100e0d29 58%, #0e0b09b0 100%);
 }
+#video-recording {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: contain; background: #080808; pointer-events: none;
+}
+.stage[data-video-playing="true"] .identity {
+  inset: 5% 6% auto;
+  padding: .45rem .65rem;
+  border-radius: .65rem;
+  background: #080808b8;
+}
+.stage[data-video-playing="true"] .identity h1 {
+  font-size: clamp(.85rem, calc(var(--phone-width) * .051), 1.5rem);
+}
+.stage[data-video-playing="true"] .state { margin-top: .15rem; }
 .notch {
   position: absolute; top: -1px; left: 50%; transform: translateX(-50%);
   width: 53%; height: 4.1%; background: #070707; border-radius: 0 0 14px 14px;
@@ -224,6 +238,7 @@ input::file-selector-button {
   <section class="phone" aria-label="Teléfono">
     <span class="side left" aria-hidden="true"></span><span class="side right" aria-hidden="true"></span>
     <div class="display">
+      <video id="video-recording" preload="none" playsinline disablepictureinpicture hidden></video>
       <div class="notch" aria-hidden="true"></div>
       <div class="identity">
         <h1 id="caller">En espera</h1>

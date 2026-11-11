@@ -59,13 +59,14 @@ function post(path, data) {
 function render(data) {
   togglePanel(true);
   get('screen').href = data.screenPath;
+  get('video-upload').hidden = !data.videoEnabled;
   const signature = JSON.stringify(data);
   if (signature === lastView) return;
   lastView = signature;
   const playing = ['ringing', 'playing', 'snoozed'].includes(data.phase);
   const pending = data.tracks.filter(track => !track.played_at);
   get('status').textContent = data.name ? labels[data.phase] + ' · ' + data.name
-    : data.tracks.length && !pending.length ? 'Se reprodujeron todos los audios.' : labels[data.phase];
+    : data.tracks.length && !pending.length ? 'Se reprodujeron todas las grabaciones.' : labels[data.phase];
   get('progress').textContent = (data.tracks.length - pending.length) + ' de ' + data.tracks.length + ' reproducidos';
   get('launch').disabled = playing || !pending.length;
   get('launch').textContent = ['rejected', 'interrupted'].includes(data.phase) && pending[0]?.id === data.activeId
@@ -77,7 +78,13 @@ function render(data) {
     const active = data.activeId === track.id;
     row.dataset.active = active;
     row.insertCell().textContent = index + 1;
-    row.insertCell().textContent = track.name;
+    const nameCell = row.insertCell();
+    nameCell.textContent = track.name;
+    if (track.kind === 'video') {
+      const type = document.createElement('small');
+      type.textContent = ' · Video';
+      nameCell.append(type);
+    }
     row.insertCell().textContent = track.played_at ? 'Reproducido' : active ? labels[data.phase] : 'Pendiente';
     const controls = row.insertCell();
     const group = document.createElement('div');
@@ -93,7 +100,7 @@ function render(data) {
       }),
       makeButton('Copiar enlace', () => task(async () => {
         await navigator.clipboard.writeText(new URL('/media/' + track.media_id, location.origin).href);
-        feedback('Enlace del audio copiado.');
+        feedback('Enlace copiado.');
       }))
     );
     controls.append(group);
@@ -147,39 +154,46 @@ get('login').addEventListener('submit', event => {
 });
 get('logout').addEventListener('click', () => { logout(); feedback(''); });
 get('launch').addEventListener('click', () => task(() => post('launch')));
-get('audio').addEventListener('change', () => {
-  const count = get('audio').files.length;
-  get('name').disabled = count !== 1;
-  get('name').value = count === 1 ? fileParts(get('audio').files[0]).name.slice(0, 100) : '';
-});
-get('upload').addEventListener('submit', event => {
-  event.preventDefault();
-  const files = Array.from(get('audio').files);
-  const custom = get('name').value.trim();
-  task(async () => {
-    let added = 0;
-    let duplicates = 0;
-    const failures = [];
-    for (const [index, file] of files.entries()) {
-      feedback('Subiendo ' + (index + 1) + ' de ' + files.length + '…');
-      const { extension, name } = fileParts(file);
-      const params = new URLSearchParams({ extension, name: (files.length === 1 && custom ? custom : name).slice(0, 100) });
-      try {
-        const result = await api('audio?' + params, { method: 'POST', body: file });
-        if (result.alreadyAdded) duplicates++;
-        else added++;
-      } catch (error) {
-        failures.push(file.name + ' · ' + error.message);
-      }
-    }
-    if (!failures.length) {
-      event.target.reset();
-      get('name').disabled = true;
-    }
-    feedback(added + ' agregado(s), ' + duplicates + ' ya en la lista.' + (failures.length ? ' ' + failures.join(' | ') : ''),
-      failures.length > 0);
+function setupUpload(kind, form, input, nameInput) {
+  input.addEventListener('change', () => {
+    const count = input.files.length;
+    nameInput.disabled = count !== 1;
+    nameInput.value = count === 1 ? fileParts(input.files[0]).name.slice(0, 100) : '';
   });
-});
+  form.addEventListener('submit', event => {
+    event.preventDefault();
+    const files = Array.from(input.files);
+    const custom = nameInput.value.trim();
+    task(() => uploadFiles(kind, files, custom, form, nameInput));
+  });
+}
+
+async function uploadFiles(kind, files, custom, form, nameInput) {
+  let added = 0;
+  let duplicates = 0;
+  const failures = [];
+  for (const [index, file] of files.entries()) {
+    feedback('Subiendo ' + (index + 1) + ' de ' + files.length + '…');
+    const { extension, name } = fileParts(file);
+    const params = new URLSearchParams({ extension, name: (files.length === 1 && custom ? custom : name).slice(0, 100) });
+    try {
+      const result = await api(kind + '?' + params, { method: 'POST', body: file });
+      if (result.alreadyAdded) duplicates++;
+      else added++;
+    } catch (error) {
+      failures.push(file.name + ' · ' + error.message);
+    }
+  }
+  if (!failures.length) {
+    form.reset();
+    nameInput.disabled = true;
+  }
+  feedback(added + ' agregado(s), ' + duplicates + ' ya en la lista.' + (failures.length ? ' ' + failures.join(' | ') : ''),
+    failures.length > 0);
+}
+
+setupUpload('audio', get('upload'), get('audio'), get('name'));
+setupUpload('video', get('video-upload'), get('video'), get('video-name'));
 get('background').addEventListener('submit', event => {
   event.preventDefault();
   const [file] = get('image').files;

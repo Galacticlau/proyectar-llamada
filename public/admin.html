@@ -45,10 +45,19 @@
         <small>Máximo 10 MB.</small>
         <button type="submit">Guardar fondo</button>
       </form>
+      <form class="panel" id="video-upload" hidden>
+        <h2>Cargar videos</h2>
+        <label for="video">Archivos MP4</label>
+        <input id="video" type="file" multiple required accept="video/mp4,.mp4">
+        <label for="video-name">Nombre en pantalla</label>
+        <input id="video-name" maxlength="100" placeholder="Nombre del archivo" disabled>
+        <small>Máximo 64 MB por video. Al cargar varios, se usa el nombre de cada archivo.</small>
+        <button type="submit">Subir videos a la lista</button>
+      </form>
     </div>
     <section class="panel" aria-labelledby="order-title">
       <h2 id="order-title">Orden de las llamadas</h2>
-      <p id="empty">Todavía no hay audios en la lista.</p>
+      <p id="empty">Todavía no hay grabaciones en la lista.</p>
       <div class="table-scroll">
         <table id="queue" hidden>
           <thead><tr><th scope="col">Orden</th><th scope="col">Nombre</th><th scope="col">Estado</th><th scope="col">Acciones</th></tr></thead>

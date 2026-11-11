@@ -2,6 +2,7 @@ const get = id => document.getElementById(id);
 const stage = get('stage');
 const ringtone = get('ringtone');
 const recording = get('recording');
+const videoRecording = get('video-recording');
 const status = get('status');
 const notice = get('notice');
 const enable = get('enable');
@@ -17,6 +18,7 @@ let snapshot;
 let unlocked = false;
 let ringingAttempt;
 let activeAttempt;
+let activeMedia = recording;
 let failedAttempt;
 let pendingFinish = sessionStorage.getItem(finishKey);
 let busy = false;
@@ -52,7 +54,7 @@ function stopRing() {
 }
 
 function updateTimer() {
-  const seconds = Math.floor(recording.currentTime);
+  const seconds = Math.floor(activeMedia.currentTime);
   status.textContent = Math.floor(seconds / 60) + ':' + String(seconds % 60).padStart(2, '0');
 }
 
@@ -60,13 +62,16 @@ function render(data) {
   snapshot = data;
   const ringing = data.phase === 'ringing';
   const playing = data.phase === 'playing' && activeAttempt === data.attempt;
+  const videoPlaying = playing && data.kind === 'video';
   stage.dataset.mode = ringing ? 'ringing' : playing ? 'active' : data.phase;
+  stage.dataset.videoPlaying = videoPlaying;
+  videoRecording.hidden = !videoPlaying;
   get('caller').textContent = data.name || 'En espera';
   if (playing) updateTimer();
-  else status.textContent = labels[data.phase];
+  else status.textContent = ringing && data.kind === 'video' ? 'Videollamada entrante' : labels[data.phase];
   get('ring-actions').hidden = !ringing;
   get('dots').hidden = !ringing;
-  get('wave').hidden = !playing;
+  get('wave').hidden = !playing || videoPlaying;
   get('snooze').hidden = !ringing;
   if (data.wallpaper) {
     stage.style.setProperty('--wallpaper', 'url("' + data.wallpaper + '")');
@@ -85,7 +90,7 @@ function render(data) {
     ringingAttempt = undefined;
   }
   if (activeAttempt && !playing && !busy) {
-    recording.pause();
+    activeMedia.pause();
     activeAttempt = undefined;
   }
 }
@@ -137,21 +142,20 @@ async function respond(action) {
   if (busy || snapshot?.phase !== 'ringing') return;
   busy = true;
   showNotice('');
-  const { attempt, audio } = snapshot;
+  const { attempt, audio, kind } = snapshot;
   if (action === 'answer') stopRing();
   try {
     await send(action, attempt);
     if (action === 'answer') {
       activeAttempt = attempt;
+      activeMedia = kind === 'video' ? videoRecording : recording;
       lastHeartbeat = Date.now();
       render({ ...snapshot, phase: 'playing' });
-      recording.src = audio;
+      activeMedia.src = audio;
       try {
-        await recording.play();
+        await activeMedia.play();
       } catch {
-        failedAttempt = attempt;
-        activeAttempt = undefined;
-        showNotice('No se pudo reproducir el audio. Pide al admin que vuelva a llamar.');
+        if (activeAttempt === attempt) failPlayback();
       }
     }
   } catch (error) {
@@ -178,21 +182,34 @@ enable.addEventListener('click', async () => {
 get('answer').addEventListener('click', () => respond('answer'));
 get('reject').addEventListener('click', () => respond('reject'));
 get('snooze').addEventListener('click', () => respond('snooze'));
-recording.addEventListener('timeupdate', () => { if (activeAttempt) updateTimer(); });
-recording.addEventListener('ended', () => {
-  if (!activeAttempt) return;
+function finishPlayback() {
   pendingFinish = activeAttempt;
   activeAttempt = undefined;
   sessionStorage.setItem(finishKey, pendingFinish);
   poll();
-});
-recording.addEventListener('error', () => {
-  if (!activeAttempt) return;
+}
+
+function failPlayback() {
   failedAttempt = activeAttempt;
   activeAttempt = undefined;
-  showNotice('No se pudo reproducir el audio. Pide al admin que vuelva a llamar.');
+  videoRecording.hidden = true;
+  stage.dataset.videoPlaying = 'false';
+  const type = activeMedia === videoRecording ? 'video' : 'audio';
+  showNotice('No se pudo reproducir el ' + type + '. Pide al admin que vuelva a llamar.');
   poll();
-});
+}
+
+for (const player of [recording, videoRecording]) {
+  player.addEventListener('timeupdate', () => {
+    if (activeAttempt && player === activeMedia) updateTimer();
+  });
+  player.addEventListener('ended', () => {
+    if (activeAttempt && player === activeMedia) finishPlayback();
+  });
+  player.addEventListener('error', () => {
+    if (activeAttempt && player === activeMedia) failPlayback();
+  });
+}
 const fullscreen = get('fullscreen');
 fullscreen.addEventListener('click', async () => {
   try {

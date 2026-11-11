@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS media (
   bytes bytea NOT NULL,
   digest text UNIQUE NOT NULL
 );
+ALTER TABLE media ADD COLUMN IF NOT EXISTS object_key text;
 
 CREATE TABLE IF NOT EXISTS tracks (
   id uuid PRIMARY KEY,

@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
+import { videoStorage } from './video-storage.js';
 
 const { DATABASE_URL, APP_ADMIN_KEY, PORT = '3000', HOST = '0.0.0.0' } = process.env;
 if (!DATABASE_URL || !APP_ADMIN_KEY || APP_ADMIN_KEY.length < 16) {
@@ -100,16 +101,24 @@ async function withRoom(action) {
 }
 
 async function state(db, room, admin) {
-  const { rows: [active] } = await db.query('SELECT name, media_id FROM tracks WHERE id = $1', [room.track_id]);
+  const { rows: [active] } = await db.query(
+    'SELECT tracks.name, tracks.media_id, media.object_key FROM tracks JOIN media ON media.id = tracks.media_id WHERE tracks.id = $1',
+    [room.track_id]);
   const output = {
     phase: room.phase, attempt: room.attempt, deadline: room.deadline,
     name: active?.name ?? null,
     audio: active ? '/media/' + active.media_id : null,
+    kind: active ? (active.object_key ? 'video' : 'audio') : null,
     wallpaper: room.wallpaper ? '/media/' + room.wallpaper : null
   };
   if (admin) {
-    const { rows } = await db.query('SELECT id, name, position, media_id, played_at FROM tracks ORDER BY position');
+    const { rows } = await db.query(`
+      SELECT tracks.id, name, position, media_id, played_at,
+        CASE WHEN media.object_key IS NULL THEN 'audio' ELSE 'video' END AS kind
+      FROM tracks JOIN media ON media.id = tracks.media_id ORDER BY position
+    `);
     output.tracks = rows;
+    output.videoEnabled = Boolean(videoStorage);
     output.screenPath = '/pantalla#' + screenKey;
     output.activeId = room.track_id;
   }
@@ -176,16 +185,29 @@ async function moveTrack(db, room, id, direction) {
 async function upload(req, url, kind) {
   const extension = url.searchParams.get('extension')?.toLowerCase();
   const audio = kind === 'audio';
-  const mime = (audio ? audioTypes : imageTypes).get(extension);
-  if (!mime) throw new HttpError(415, audio ? 'Formato de audio inválido. Prueba con MP3 o WAV.' : 'Usa una imagen JPG, PNG o WebP.');
-  const name = audio ? nameFrom(url.searchParams.get('name')) : null;
-  const bytes = await readBody(req, (audio ? 32 : 10) * 1024 * 1024);
+  const video = kind === 'video';
+  if (video && !videoStorage) throw new HttpError(503, 'El almacenamiento de videos no está disponible.');
+  const mime = video ? (extension === 'mp4' ? 'video/mp4' : null) : (audio ? audioTypes : imageTypes).get(extension);
+  if (!mime) {
+    const formats = { audio: 'Prueba con MP3 o WAV.', video: 'Usa un video MP4.', background: 'Usa una imagen JPG, PNG o WebP.' };
+    throw new HttpError(415, formats[kind]);
+  }
+  const name = audio || video ? nameFrom(url.searchParams.get('name')) : null;
+  const bytes = await readBody(req, (video ? 64 : audio ? 32 : 10) * 1024 * 1024);
+  if (video && (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp')) {
+    throw new HttpError(415, 'El archivo debe ser un video MP4 válido.');
+  }
   const digest = createHash('sha256').update(mime).update(bytes).digest('hex');
+  const objectKey = video ? 'videos/' + digest + '.mp4' : null;
+  if (video) {
+    const { rowCount } = await pool.query('SELECT 1 FROM media WHERE digest = $1', [digest]);
+    if (!rowCount) await videoStorage.put(objectKey, bytes);
+  }
   return withRoom(async db => {
-    await db.query('INSERT INTO media VALUES ($1, $2, $3, $4) ON CONFLICT (digest) DO NOTHING',
-      [randomUUID(), mime, bytes, digest]);
+    await db.query('INSERT INTO media (id, mime, bytes, digest, object_key) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (digest) DO NOTHING',
+      [randomUUID(), mime, video ? Buffer.alloc(0) : bytes, digest, objectKey]);
     const { rows: [{ id }] } = await db.query('SELECT id FROM media WHERE digest = $1', [digest]);
-    if (!audio) {
+    if (!audio && !video) {
       await db.query('UPDATE room SET wallpaper = $1 WHERE id = 1', [id]);
       return { url: '/media/' + id };
     }
@@ -200,8 +222,13 @@ async function upload(req, url, kind) {
 
 async function media(req, res, id) {
   if (!uuid.test(id)) throw new HttpError(404, 'Archivo no encontrado.');
-  const { rows: [file] } = await pool.query('SELECT mime, octet_length(bytes) AS size FROM media WHERE id = $1', [id]);
+  const { rows: [file] } = await pool.query('SELECT mime, octet_length(bytes) AS size, object_key FROM media WHERE id = $1', [id]);
   if (!file) throw new HttpError(404, 'Archivo no encontrado.');
+  if (file.object_key) {
+    if (!videoStorage) throw new HttpError(503, 'El almacenamiento de videos no está disponible.');
+    res.writeHead(307, { Location: await videoStorage.url(file.object_key, req.method) }).end();
+    return;
+  }
   let start = 0;
   let end = file.size - 1;
   const range = req.headers.range;
@@ -237,7 +264,8 @@ async function route(req, res) {
   res.setHeader('Referrer-Policy', 'no-referrer');
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Robots-Tag', 'noindex, nofollow');
-  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  const videoOrigin = videoStorage ? ' ' + videoStorage.origin : '';
+  res.setHeader('Content-Security-Policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' data:" + videoOrigin + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
 
   if (method === 'GET' && path === '/health') {
     await pool.query('SELECT 1');
@@ -267,6 +295,7 @@ async function route(req, res) {
       return json(res, 200, { ok: true });
     }
     if (method === 'POST' && path === '/api/admin/audio') return json(res, 201, await upload(req, url, 'audio'));
+    if (method === 'POST' && path === '/api/admin/video') return json(res, 201, await upload(req, url, 'video'));
     if (method === 'POST' && path === '/api/admin/background') return json(res, 201, await upload(req, url, 'background'));
   }
   if (path.startsWith('/api/screen/')) {
@@ -295,4 +324,9 @@ createServer((req, res) => route(req, res).catch(error => {
   if (res.headersSent || res.destroyed) return res.end();
   if (!error.status) console.error('Error del servidor:', error.code || error.name);
   json(res, error.status || 500, { error: error.status ? error.message : 'Error del servidor. Vuelve a intentar.' });
-})).listen(Number(PORT), HOST, () => console.log('Llamada para proyectar lista.'));
+})).listen(Number(PORT), HOST, () => {
+  console.log('Llamada para proyectar lista.');
+  videoStorage?.check()
+    .then(() => console.log('Bucket de videos accesible.'))
+    .catch(error => console.warn('No se pudo verificar el bucket de videos:', error.name));
+});
