@@ -6,21 +6,25 @@ const videoRecording = get('video-recording');
 const status = get('status');
 const notice = get('notice');
 const enable = get('enable');
-const key = location.hash.slice(1);
-const finishKey = 'llamada-fin:' + key;
+const shortProjection = /^\/4a\/?$/i.test(location.pathname);
+const accessDialog = get('projection-access');
+const accessForm = get('projection-form');
+const accessError = get('projection-error');
+const sessionKey = 'llamada-proyeccion-4A';
+let key;
+let finishKey;
 const labels = {
   waiting: 'Esperando la siguiente llamada', ringing: 'Llamada entrante',
   playing: 'En llamada', snoozed: 'Volverá a sonar en 5 segundos',
   rejected: 'Llamada rechazada', interrupted: 'Audio pendiente'
 };
-const headers = { Authorization: 'Bearer ' + key };
 let snapshot;
 let unlocked = false;
 let ringingAttempt;
 let activeAttempt;
 let activeMedia = recording;
 let failedAttempt;
-let pendingFinish = sessionStorage.getItem(finishKey);
+let pendingFinish;
 let busy = false;
 let polling = false;
 let lastHeartbeat = 0;
@@ -30,9 +34,15 @@ let retryAfter = 0;
 let confirmedMedia;
 let confirmedAt = 0;
 
+function screenHeaders() {
+  const headers = { Authorization: 'Bearer ' + key };
+  if (shortProjection) headers['X-Projection-Path'] = '/4A';
+  return headers;
+}
+
 async function request(path, options = {}) {
   const response = await fetch('/api/screen/' + path, {
-    ...options, headers: { ...headers, ...options.headers }
+    ...options, headers: { ...screenHeaders(), ...options.headers }
   });
   const data = await response.json();
   if (!response.ok) {
@@ -56,7 +66,7 @@ function prepare(mediaId) {
   if (!mediaId || prepared.has(mediaId) || download || Date.now() < retryAfter) return;
   const current = { id: mediaId, controller: new AbortController() };
   download = current;
-  fetch('/api/screen/preload/' + mediaId, { headers, signal: current.controller.signal })
+  fetch('/api/screen/preload/' + mediaId, { headers: screenHeaders(), signal: current.controller.signal })
     .then(response => {
       if (!response.ok) throw new Error('Descarga no disponible');
       return response.blob();
@@ -180,6 +190,12 @@ async function poll() {
       }
     }
     const next = await request('state');
+    if (shortProjection && (location.hash || accessDialog.open || !sessionStorage.getItem(sessionKey))) {
+      sessionStorage.setItem(sessionKey, key);
+      if (location.hash) history.replaceState(null, '', '/4A');
+      accessDialog.close();
+      enable.hidden = unlocked;
+    }
     if (!busy) {
       render(next);
       prepare(next.phase === 'ringing' ? next.mediaId : next.nextMedia);
@@ -190,6 +206,17 @@ async function poll() {
       delete notice.dataset.connection;
     }
   } catch (error) {
+    if (shortProjection && error.status === 401 && !activeAttempt) {
+      key = '';
+      sessionStorage.removeItem(sessionKey);
+      if (location.hash) history.replaceState(null, '', '/4A');
+      showProjectionAccess('Abre el enlace de proyección de 4° Medio A desde Administración.');
+      return;
+    }
+    if (shortProjection && accessDialog.open) {
+      accessError.textContent = 'No se pudo conectar. Volveremos a intentar.';
+      accessError.hidden = false;
+    }
     if (!activeAttempt) {
       notice.dataset.connection = 'true';
       showNotice(error.status === 401 ? error.message : 'Conexión interrumpida. Reconectando…');
@@ -289,10 +316,48 @@ fullscreen.addEventListener('click', async () => {
 document.addEventListener('fullscreenchange', () => {
   fullscreen.textContent = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
 });
-if (key) {
+function connect(token) {
+  key = token;
+  finishKey = 'llamada-fin:' + key;
+  pendingFinish = sessionStorage.getItem(finishKey);
   poll();
-  setInterval(poll, 900);
+}
+
+function showProjectionAccess(message = '') {
+  enable.hidden = true;
+  get('caller').textContent = '4° Medio A';
+  accessError.textContent = message;
+  accessError.hidden = !message;
+  if (!accessDialog.open) accessDialog.showModal();
+}
+
+if (shortProjection) {
+  accessDialog.addEventListener('cancel', event => event.preventDefault());
+  accessForm.addEventListener('submit', event => {
+    event.preventDefault();
+    if (polling) return;
+    const input = get('projection-link');
+    let token;
+    try {
+      token = new URL(input.value.trim(), location.origin).hash.slice(1);
+    } catch {}
+    if (!/^[A-Za-z0-9_-]{43}$/.test(token || '')) {
+      showProjectionAccess('Pega el enlace completo de la pantalla de usuario.');
+      return;
+    }
+    input.value = '';
+    accessError.hidden = true;
+    connect(token);
+  });
+}
+
+const initialKey = location.hash.slice(1) || (shortProjection ? sessionStorage.getItem(sessionKey) : '');
+if (initialKey) {
+  connect(initialKey);
+} else if (shortProjection) {
+  showProjectionAccess();
 } else {
   enable.hidden = true;
   showNotice('Abre el enlace de proyección desde Administración.');
 }
+if (initialKey || shortProjection) setInterval(poll, 900);

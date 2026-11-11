@@ -262,6 +262,18 @@ input::file-selector-button {
     <button class="chrome launch" id="enable" type="button">Activar sonido</button>
   </div>
 </main>
+<dialog id="projection-access" aria-labelledby="projection-access-title">
+  <h2 id="projection-access-title">Proyección de 4° Medio A</h2>
+  <form id="projection-form">
+    <div class="field">
+      <label for="projection-link">Enlace de proyección del curso</label>
+      <input id="projection-link" type="password" required autocomplete="off" spellcheck="false">
+    </div>
+    <p class="hint">Copia el enlace de «Abrir pantalla de usuario» desde Administración.</p>
+    <p class="hint" id="projection-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button class="chrome launch" type="submit">Abrir proyección</button></div>
+  </form>
+</dialog>
 <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" aria-hidden="true" style="position:absolute">
   <defs><path id="handset" d="M5.2 3.3c.6-.6 1.6-.5 2.1.2l3 3.9c.5.6.4 1.5-.2 2l-1.7 1.5c1.2 2 2.8 3.6 4.8 4.8l1.5-1.7c.5-.6 1.4-.7 2-.2l3.9 3c.7.5.8 1.5.2 2.1l-1.7 1.7c-.8.8-2 .9-3.1.6C9.4 19.4 4.6 14.6 2.8 8c-.3-1.1-.2-2.3.6-3.1z"/></defs>
 </svg>

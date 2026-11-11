@@ -4,6 +4,8 @@ Simulador de llamadas entrantes con un panel de administración y una pantalla d
 
 ## Uso
 
+La pantalla de 4° Medio A tiene el acceso corto `/4A`. Usa el enlace de proyección desde Administración para habilitarla. La misma pestaña recuerda el acceso al recargar.
+
 1. En `/admin`, ingresa la clave de administración.
 2. Carga los archivos de audio. Puedes editar el nombre de cada llamada, ordenar los pendientes y copiar el enlace directo a cada grabación.
 3. Abre la pantalla de usuario desde Administración. En el computador conectado al proyector, pulsa **Activar sonido** una vez y, si quieres, **Pantalla completa**.

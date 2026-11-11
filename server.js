@@ -23,6 +23,8 @@ for (const room of rooms) {
   room.screenKey = createHmac('sha256', room.adminKey).update('pantalla').digest('base64url');
 }
 const roomsById = new Map(rooms.map(room => [room.id, room]));
+const shortProjectionRoomId = 2;
+const shortProjectionPath = '/4A';
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const audioTypes = new Map(Object.entries({
@@ -151,7 +153,8 @@ async function state(db, room, admin) {
     `, [room.id]);
     output.tracks = rows;
     output.videoEnabled = Boolean(videoStorage);
-    output.screenPath = '/pantalla#' + config.screenKey;
+    const projectionPath = room.id === shortProjectionRoomId ? shortProjectionPath : '/pantalla';
+    output.screenPath = projectionPath + '#' + config.screenKey;
     output.activeId = room.track_id;
     output.preparation = next ? { name: next.name, ready: isPrepared(room, next) } : null;
   }
@@ -354,8 +357,9 @@ async function route(req, res) {
     await pool.query('SELECT 1');
     return json(res, 200, { ok: true });
   }
-  if (method === 'GET' && files.has(path)) {
-    const file = files.get(path);
+  const pagePath = /^\/4a\/?$/i.test(path) ? '/pantalla' : path;
+  if (method === 'GET' && files.has(pagePath)) {
+    const file = files.get(pagePath);
     const type = file.type.startsWith('text/') ? file.type + '; charset=utf-8' : file.type;
     return res.writeHead(200, { 'Content-Type': type, 'Content-Length': file.bytes.length }).end(file.bytes);
   }
@@ -387,6 +391,9 @@ async function route(req, res) {
   if (path.startsWith('/api/screen/')) {
     const config = rooms.find(room => hasKey(req, room.screenKey));
     if (!config) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
+    if (req.headers['x-projection-path'] === shortProjectionPath && config.id !== shortProjectionRoomId) {
+      throw new HttpError(401, 'Este enlace no corresponde a 4° Medio A.');
+    }
     const roomId = config.id;
     if (method === 'GET' && path === '/api/screen/state') return json(res, 200, await withRoom(roomId, (db, room) => state(db, room, false)));
     if (method === 'GET' && path.startsWith('/api/screen/preload/')) return preload(req, res, path.slice('/api/screen/preload/'.length), roomId);
