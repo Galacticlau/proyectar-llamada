@@ -1,4 +1,5 @@
 const get = id => document.getElementById(id);
+const maxVideoBytes = 300 * 1024 * 1024;
 const labels = {
   waiting: 'En espera', ringing: 'Sonando', playing: 'Reproduciendo',
   snoozed: 'Pospuesta', rejected: 'Rechazada. El audio sigue pendiente.',
@@ -213,6 +214,10 @@ async function uploadFiles(kind, files, custom, form, nameInput) {
   const duplicates = [];
   const failures = [];
   for (const [index, file] of files.entries()) {
+    if (kind === 'video' && file.size > maxVideoBytes) {
+      failures.push(file.name + ' · El video supera el máximo de 300 MiB.');
+      continue;
+    }
     uploadFeedback(form, 'Subiendo ' + (index + 1) + ' de ' + files.length + '…');
     const { extension, name } = fileParts(file);
     const params = new URLSearchParams({ extension, name: (files.length === 1 && custom ? custom : name).slice(0, 100) });
