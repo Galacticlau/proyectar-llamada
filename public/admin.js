@@ -13,12 +13,17 @@ async function api(path, options = {}) {
   const response = await fetch('/api/admin/' + path, {
     ...options, headers: { Authorization: 'Bearer ' + key, ...options.headers }
   });
-  const data = await response.json();
+  const isJson = response.headers.get('content-type')?.includes('application/json');
+  const data = isJson ? await response.json().catch(() => null) : null;
   if (!response.ok) {
-    const error = new Error(data.error);
+    const fallback = response.status === 413
+      ? 'El servidor rechazó la carga por el tamaño del archivo.'
+      : 'El servidor respondió con un error (' + response.status + '). Vuelve a intentar.';
+    const error = new Error(data?.error || fallback);
     error.status = response.status;
     throw error;
   }
+  if (!data) throw new Error('La respuesta del servidor no se pudo leer. Vuelve a intentar.');
   return data;
 }
 

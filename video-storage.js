@@ -25,9 +25,9 @@ export const videoStorage = client ? {
   check() {
     return client.send(new HeadBucketCommand({ Bucket: bucket }), { abortSignal: AbortSignal.timeout(5000) });
   },
-  async put(key, bytes) {
+  async put(key, stream, size) {
     await client.send(new PutObjectCommand({
-      Bucket: bucket, Key: key, Body: bytes, ContentType: 'video/mp4'
+      Bucket: bucket, Key: key, Body: stream, ContentLength: size, ContentType: 'video/mp4'
     }));
   },
   get(key, abortSignal) {

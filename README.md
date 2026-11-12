@@ -15,7 +15,7 @@ Las pantallas de 4° Medio tienen los accesos cortos `/4A`, `/4B` y `/4C`. En el
 
 La pantalla de proyección descarga la próxima grabación completa antes de habilitar la llamada. Mantén abierta esa pantalla y espera el aviso de que la grabación está lista. Si la conexión se interrumpe durante la reproducción, el archivo local puede terminar y la confirmación se envía al reconectar.
 
-Para una videollamada, carga un MP4 de hasta 64 MB en **Cargar videos**. Los videos comparten la lista con los audios y aparecen dentro del teléfono al contestar. Los enlaces directos a videos usan una dirección estable que genera un acceso temporal al archivo.
+Para una videollamada, carga un MP4 de hasta 300 MiB en **Cargar videos**. Los videos comparten la lista con los audios y aparecen dentro del teléfono al contestar. Los enlaces directos a videos usan una dirección estable que genera un acceso temporal al archivo.
 
 El enlace de proyección permite responder a las llamadas de esta sala. Cada enlace directo de audio permite escuchar esa grabación a quien lo tenga. Comparte los enlaces con las personas que deben usarlos.
 

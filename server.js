@@ -1,6 +1,9 @@
 import { createServer } from 'node:http';
 import { createHash, createHmac, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { createReadStream, createWriteStream } from 'node:fs';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import pg from 'pg';
 import { videoStorage } from './video-storage.js';
@@ -26,6 +29,7 @@ for (const room of rooms) {
 const roomsById = new Map(rooms.map(room => [room.id, room]));
 const roomsByProjectionPath = new Map(rooms.filter(room => room.projectionPath).map(room => [room.projectionPath, room]));
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
+const maxVideoBytes = 300 * 1024 * 1024;
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const audioTypes = new Map(Object.entries({
   mp3: 'audio/mpeg', wav: 'audio/wav', m4a: 'audio/mp4', mp4: 'audio/mp4',
@@ -57,23 +61,27 @@ function hasKey(req, key) {
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
-async function readBody(req, max) {
+async function* bodyChunks(req, max, tooLarge = 'El archivo supera el tamaño permitido.') {
   if (Number(req.headers['content-length']) > max) {
     req.resume();
-    throw new HttpError(413, 'El archivo supera el tamaño permitido.');
+    throw new HttpError(413, tooLarge);
   }
-  const chunks = [];
   let size = 0;
   for await (const chunk of req.iterator({ destroyOnReturn: false })) {
     size += chunk.length;
     if (size > max) {
       req.resume();
-      throw new HttpError(413, 'El archivo supera el tamaño permitido.');
+      throw new HttpError(413, tooLarge);
     }
-    chunks.push(chunk);
+    yield chunk;
   }
   if (size === 0) throw new HttpError(400, 'El archivo está vacío.');
-  return Buffer.concat(chunks, size);
+}
+
+async function readBody(req, max) {
+  const chunks = [];
+  for await (const chunk of bodyChunks(req, max)) chunks.push(chunk);
+  return Buffer.concat(chunks);
 }
 
 async function readJson(req) {
@@ -232,6 +240,42 @@ async function moveTrack(db, room, id, direction) {
   return { ok: true };
 }
 
+async function storeVideo(req, hash) {
+  const chunks = bodyChunks(req, maxVideoBytes, 'El video supera el máximo de 300 MiB.');
+  const directory = await mkdtemp(join(tmpdir(), 'llamada-video-'));
+  const path = join(directory, 'upload.mp4');
+  const header = Buffer.alloc(12);
+  let size = 0;
+  async function* writeChunks() {
+    for await (const chunk of chunks) {
+      if (size < header.length) chunk.copy(header, size);
+      size += chunk.length;
+      hash.update(chunk);
+      yield chunk;
+    }
+  }
+  try {
+    await pipeline(writeChunks(), createWriteStream(path, { mode: 0o600 }));
+    if (size < header.length || header.toString('ascii', 4, 8) !== 'ftyp') {
+      throw new HttpError(415, 'El archivo debe ser un video MP4 válido.');
+    }
+    const digest = hash.digest('hex');
+    const objectKey = 'videos/' + digest + '.mp4';
+    const { rowCount } = await pool.query('SELECT 1 FROM media WHERE digest = $1', [digest]);
+    if (!rowCount) {
+      const stream = createReadStream(path);
+      try {
+        await videoStorage.put(objectKey, stream, size);
+      } finally {
+        stream.destroy();
+      }
+    }
+    return { digest, objectKey, bytes: Buffer.alloc(0) };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function upload(req, url, kind, roomId) {
   const extension = url.searchParams.get('extension')?.toLowerCase();
   const audio = kind === 'audio';
@@ -243,21 +287,20 @@ async function upload(req, url, kind, roomId) {
     throw new HttpError(415, formats[kind]);
   }
   const name = audio || video ? nameFrom(url.searchParams.get('name')) : null;
-  const bytes = await readBody(req, (video ? 64 : audio ? 32 : 10) * 1024 * 1024);
-  if (video && (bytes.length < 12 || bytes.toString('ascii', 4, 8) !== 'ftyp')) {
-    throw new HttpError(415, 'El archivo debe ser un video MP4 válido.');
-  }
   const hash = createHash('sha256');
   if (roomId !== 1) hash.update('room:' + roomId + '\0');
-  const digest = hash.update(mime).update(bytes).digest('hex');
-  const objectKey = video ? 'videos/' + digest + '.mp4' : null;
+  hash.update(mime);
+  let mediaFile;
   if (video) {
-    const { rowCount } = await pool.query('SELECT 1 FROM media WHERE digest = $1', [digest]);
-    if (!rowCount) await videoStorage.put(objectKey, bytes);
+    mediaFile = await storeVideo(req, hash);
+  } else {
+    const bytes = await readBody(req, (audio ? 32 : 10) * 1024 * 1024);
+    mediaFile = { bytes, digest: hash.update(bytes).digest('hex'), objectKey: null };
   }
+  const { bytes, digest, objectKey } = mediaFile;
   return withRoom(roomId, async db => {
     await db.query('INSERT INTO media (id, mime, bytes, digest, object_key) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (digest) DO NOTHING',
-      [randomUUID(), mime, video ? Buffer.alloc(0) : bytes, digest, objectKey]);
+      [randomUUID(), mime, bytes, digest, objectKey]);
     const { rows: [{ id }] } = await db.query('SELECT id FROM media WHERE digest = $1', [digest]);
     if (!audio && !video) {
       await db.query('UPDATE room SET wallpaper = $1 WHERE id = $2', [id, roomId]);
