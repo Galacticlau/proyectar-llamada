@@ -389,6 +389,10 @@ async function route(req, res) {
     if (method === 'POST' && path === '/api/admin/background') return json(res, 201, await upload(req, url, 'background', roomId));
   }
   if (path.startsWith('/api/screen/')) {
+    if (method === 'GET' && path === '/api/screen/4A/status') {
+      const { rows: [room] } = await pool.query('SELECT phase FROM room WHERE id = $1', [shortProjectionRoomId]);
+      return json(res, 200, { phase: room.phase });
+    }
     const config = rooms.find(room => hasKey(req, room.screenKey));
     if (!config) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
     if (req.headers['x-projection-path'] === shortProjectionPath && config.id !== shortProjectionRoomId) {

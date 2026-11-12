@@ -7,9 +7,7 @@ const status = get('status');
 const notice = get('notice');
 const enable = get('enable');
 const shortProjection = /^\/4a\/?$/i.test(location.pathname);
-const accessDialog = get('projection-access');
-const accessForm = get('projection-form');
-const accessError = get('projection-error');
+const projectionHint = get('projection-hint');
 const sessionKey = 'llamada-proyeccion-4A';
 let key;
 let finishKey;
@@ -35,7 +33,7 @@ let confirmedMedia;
 let confirmedAt = 0;
 
 function screenHeaders() {
-  const headers = { Authorization: 'Bearer ' + key };
+  const headers = key ? { Authorization: 'Bearer ' + key } : {};
   if (shortProjection) headers['X-Projection-Path'] = '/4A';
   return headers;
 }
@@ -161,9 +159,15 @@ function render(data) {
 }
 
 async function poll() {
-  if (!key || polling || busy) return;
+  if ((!key && !shortProjection) || polling || busy) return;
   polling = true;
   try {
+    if (!key) {
+      const { phase } = await request('4A/status');
+      renderPreview(phase);
+      showNotice('');
+      return;
+    }
     if (pendingFinish) {
       try {
         await send('ended', pendingFinish);
@@ -190,10 +194,10 @@ async function poll() {
       }
     }
     const next = await request('state');
-    if (shortProjection && (location.hash || accessDialog.open || !sessionStorage.getItem(sessionKey))) {
-      sessionStorage.setItem(sessionKey, key);
+    if (shortProjection) {
+      if (sessionStorage.getItem(sessionKey) !== key) sessionStorage.setItem(sessionKey, key);
       if (location.hash) history.replaceState(null, '', '/4A');
-      accessDialog.close();
+      projectionHint.hidden = true;
       enable.hidden = unlocked;
     }
     if (!busy) {
@@ -210,12 +214,9 @@ async function poll() {
       key = '';
       sessionStorage.removeItem(sessionKey);
       if (location.hash) history.replaceState(null, '', '/4A');
-      showProjectionAccess('Abre el enlace de proyección de 4° Medio A desde Administración.');
+      stopRing();
+      renderPreview('waiting');
       return;
-    }
-    if (shortProjection && accessDialog.open) {
-      accessError.textContent = 'No se pudo conectar. Volveremos a intentar.';
-      accessError.hidden = false;
     }
     if (!activeAttempt) {
       notice.dataset.connection = 'true';
@@ -323,41 +324,30 @@ function connect(token) {
   poll();
 }
 
-function showProjectionAccess(message = '') {
+function renderPreview(phase) {
+  snapshot = undefined;
+  stage.dataset.mode = phase;
+  stage.dataset.videoPlaying = 'false';
+  videoRecording.hidden = true;
+  get('ring-actions').hidden = true;
+  get('snooze').hidden = true;
+  get('dots').hidden = phase !== 'ringing';
+  get('wave').hidden = true;
+  stage.style.removeProperty('--wallpaper');
   enable.hidden = true;
+  projectionHint.hidden = false;
   get('caller').textContent = '4° Medio A';
-  accessError.textContent = message;
-  accessError.hidden = !message;
-  if (!accessDialog.open) accessDialog.showModal();
-}
-
-if (shortProjection) {
-  accessDialog.addEventListener('cancel', event => event.preventDefault());
-  accessForm.addEventListener('submit', event => {
-    event.preventDefault();
-    if (polling) return;
-    const input = get('projection-link');
-    let token;
-    try {
-      token = new URL(input.value.trim(), location.origin).hash.slice(1);
-    } catch {}
-    if (!/^[A-Za-z0-9_-]{43}$/.test(token || '')) {
-      showProjectionAccess('Pega el enlace completo de la pantalla de usuario.');
-      return;
-    }
-    input.value = '';
-    accessError.hidden = true;
-    connect(token);
-  });
+  status.textContent = labels[phase] || labels.waiting;
 }
 
 const initialKey = location.hash.slice(1) || (shortProjection ? sessionStorage.getItem(sessionKey) : '');
 if (initialKey) {
   connect(initialKey);
 } else if (shortProjection) {
-  showProjectionAccess();
+  renderPreview('waiting');
+  poll();
 } else {
   enable.hidden = true;
   showNotice('Abre el enlace de proyección desde Administración.');
 }
-if (initialKey || shortProjection) setInterval(poll, 900);
+if (initialKey || shortProjection) setInterval(poll, initialKey ? 900 : 2000);
