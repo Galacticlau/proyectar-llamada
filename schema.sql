@@ -37,3 +37,4 @@ CREATE TABLE IF NOT EXISTS projection_pairing (
   expires_at timestamptz NOT NULL,
   approved boolean NOT NULL DEFAULT false
 );
+ALTER TABLE projection_pairing ADD COLUMN IF NOT EXISTS room_id integer NOT NULL DEFAULT 2 REFERENCES room(id);

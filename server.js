@@ -12,7 +12,8 @@ if (!DATABASE_URL || !APP_ADMIN_KEY || APP_ADMIN_KEY.length < 16) {
 const rooms = [
   { id: 1, name: 'Sala anterior', adminKey: APP_ADMIN_KEY },
   ...['A', 'B', 'C'].map((letter, index) => ({
-    id: index + 2, name: '4° Medio ' + letter, adminKey: process.env['APP_ADMIN_KEY_4' + letter]
+    id: index + 2, name: '4° Medio ' + letter, projectionPath: '/4' + letter,
+    adminKey: process.env['APP_ADMIN_KEY_4' + letter]
   }))
 ].filter(room => room.adminKey);
 const adminKeys = new Set(rooms.map(room => room.adminKey));
@@ -23,8 +24,7 @@ for (const room of rooms) {
   room.screenKey = createHmac('sha256', room.adminKey).update('pantalla').digest('base64url');
 }
 const roomsById = new Map(rooms.map(room => [room.id, room]));
-const shortProjectionRoomId = 2;
-const shortProjectionPath = '/4A';
+const roomsByProjectionPath = new Map(rooms.filter(room => room.projectionPath).map(room => [room.projectionPath, room]));
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
 const audioTypes = new Map(Object.entries({
@@ -153,9 +153,8 @@ async function state(db, room, admin) {
     `, [room.id]);
     output.tracks = rows;
     output.videoEnabled = Boolean(videoStorage);
-    const projectionPath = room.id === shortProjectionRoomId ? shortProjectionPath : '/pantalla';
-    output.screenPath = projectionPath + '#' + config.screenKey;
-    output.canPairProjection = room.id === shortProjectionRoomId;
+    output.screenPath = (config.projectionPath || '/pantalla') + '#' + config.screenKey;
+    output.canPairProjection = Boolean(config.projectionPath);
     output.activeId = room.track_id;
     output.preparation = next ? { name: next.name, ready: isPrepared(room, next) } : null;
   }
@@ -343,38 +342,38 @@ async function markPrepared(db, room, id) {
   return { ok: true };
 }
 
-async function createProjectionPairing() {
+async function createProjectionPairing(roomId) {
   await pool.query('DELETE FROM projection_pairing WHERE expires_at <= now()');
   for (let attempt = 0; attempt < 5; attempt++) {
     const id = randomUUID();
     const code = String(randomInt(100000, 1000000));
     const { rowCount } = await pool.query(`
-      INSERT INTO projection_pairing (id, code, expires_at)
-      VALUES ($1, $2, now() + interval '5 minutes')
+      INSERT INTO projection_pairing (id, code, expires_at, room_id)
+      VALUES ($1, $2, now() + interval '5 minutes', $3)
       ON CONFLICT (code) DO NOTHING
-    `, [id, code]);
+    `, [id, code, roomId]);
     if (rowCount) return { id, code };
   }
   throw new HttpError(503, 'Vuelve a intentar conectar el proyector.');
 }
 
-async function projectionPairingStatus(req) {
+async function projectionPairingStatus(req, config) {
   const id = (req.headers.authorization || '').replace(/^Bearer /, '');
   if (!uuid.test(id)) throw new HttpError(400, 'Solicitud de conexión inválida.');
   const { rows: [pairing] } = await pool.query(
-    'SELECT approved FROM projection_pairing WHERE id = $1 AND expires_at > now()', [id]);
+    'SELECT approved FROM projection_pairing WHERE id = $1 AND room_id = $2 AND expires_at > now()', [id, config.id]);
   if (!pairing) throw new HttpError(410, 'El código venció. Genera otro en el proyector.');
-  return { key: pairing.approved ? roomsById.get(shortProjectionRoomId).screenKey : null };
+  return { key: pairing.approved ? config.screenKey : null };
 }
 
-async function approveProjectionPairing(req) {
+async function approveProjectionPairing(req, roomId) {
   const { code } = await readJson(req) ?? {};
   if (typeof code !== 'string' || !/^\d{6}$/.test(code)) {
     throw new HttpError(400, 'Escribe los seis dígitos que aparecen en el proyector.');
   }
   const { rowCount } = await pool.query(
-    'UPDATE projection_pairing SET approved = true WHERE code = $1 AND expires_at > now()', [code]);
-  if (!rowCount) throw new HttpError(404, 'El código no está disponible. Genera otro en el proyector.');
+    'UPDATE projection_pairing SET approved = true WHERE code = $1 AND room_id = $2 AND expires_at > now()', [code, roomId]);
+  if (!rowCount) throw new HttpError(404, 'El código no está disponible para este curso. Revisa el curso y el código del proyector.');
   return { ok: true };
 }
 
@@ -393,7 +392,8 @@ async function route(req, res) {
     await pool.query('SELECT 1');
     return json(res, 200, { ok: true });
   }
-  const pagePath = /^\/4a\/?$/i.test(path) ? '/pantalla' : path;
+  const projectionPath = path.replace(/\/$/, '').toUpperCase();
+  const pagePath = roomsByProjectionPath.has(projectionPath) ? '/pantalla' : path;
   if (method === 'GET' && files.has(pagePath)) {
     const file = files.get(pagePath);
     const type = file.type.startsWith('text/') ? file.type + '; charset=utf-8' : file.type;
@@ -410,8 +410,8 @@ async function route(req, res) {
     if (method === 'POST' && path === '/api/admin/launch') return json(res, 200, await withRoom(roomId, launch));
     if (method === 'POST' && path === '/api/admin/reset') return json(res, 200, await withRoom(roomId, resetQueue));
     if (method === 'POST' && path === '/api/admin/pair') {
-      if (roomId !== shortProjectionRoomId) throw new HttpError(403, 'El código corresponde a 4° Medio A.');
-      return json(res, 200, await approveProjectionPairing(req));
+      if (!config.projectionPath) throw new HttpError(403, 'Esta sala se abre desde Administración.');
+      return json(res, 200, await approveProjectionPairing(req, roomId));
     }
     if (method === 'POST' && path === '/api/admin/move') {
       const { id, direction } = await readJson(req) ?? {};
@@ -429,18 +429,23 @@ async function route(req, res) {
     if (method === 'POST' && path === '/api/admin/background') return json(res, 201, await upload(req, url, 'background', roomId));
   }
   if (path.startsWith('/api/screen/')) {
-    if (method === 'GET' && path === '/api/screen/4A/status') {
-      const { rows: [room] } = await pool.query('SELECT phase FROM room WHERE id = $1', [shortProjectionRoomId]);
-      return json(res, 200, { phase: room.phase });
-    }
-    if (path === '/api/screen/4A/pair' && roomsById.has(shortProjectionRoomId)) {
-      if (method === 'POST') return json(res, 201, await createProjectionPairing());
-      if (method === 'GET') return json(res, 200, await projectionPairingStatus(req));
+    const courseRoute = /^\/api\/screen(\/4[ABC])\/(status|pair)$/.exec(path);
+    if (courseRoute) {
+      const [, coursePath, action] = courseRoute;
+      const config = roomsByProjectionPath.get(coursePath);
+      if (!config) throw new HttpError(404, 'Sala no disponible.');
+      if (method === 'GET' && action === 'status') {
+        const { rows: [room] } = await pool.query('SELECT phase FROM room WHERE id = $1', [config.id]);
+        return json(res, 200, { phase: room.phase });
+      }
+      if (action === 'pair' && method === 'POST') return json(res, 201, await createProjectionPairing(config.id));
+      if (action === 'pair' && method === 'GET') return json(res, 200, await projectionPairingStatus(req, config));
     }
     const config = rooms.find(room => hasKey(req, room.screenKey));
     if (!config) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
-    if (req.headers['x-projection-path'] === shortProjectionPath && config.id !== shortProjectionRoomId) {
-      throw new HttpError(401, 'Este enlace no corresponde a 4° Medio A.');
+    const requestedPath = req.headers['x-projection-path'];
+    if (requestedPath && requestedPath !== config.projectionPath) {
+      throw new HttpError(401, 'Este enlace no corresponde al curso de esta pantalla.');
     }
     const roomId = config.id;
     if (method === 'GET' && path === '/api/screen/state') return json(res, 200, await withRoom(roomId, (db, room) => state(db, room, false)));

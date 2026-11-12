@@ -6,10 +6,12 @@ const videoRecording = get('video-recording');
 const status = get('status');
 const notice = get('notice');
 const enable = get('enable');
-const shortProjection = /^\/4a\/?$/i.test(location.pathname);
+const courseCode = /^\/(4[abc])\/?$/i.exec(location.pathname)?.[1].toUpperCase();
+const shortProjection = Boolean(courseCode);
+const projectionPath = '/' + courseCode;
 const projectionHint = get('projection-hint');
 const pairProjector = get('pair-projector');
-const sessionKey = 'llamada-proyeccion-4A';
+const sessionKey = 'llamada-proyeccion-' + courseCode;
 let key;
 let finishKey;
 let pairingId;
@@ -36,7 +38,7 @@ let confirmedAt = 0;
 
 function screenHeaders() {
   const headers = key ? { Authorization: 'Bearer ' + key } : {};
-  if (shortProjection) headers['X-Projection-Path'] = '/4A';
+  if (shortProjection) headers['X-Projection-Path'] = projectionPath;
   return headers;
 }
 
@@ -61,7 +63,7 @@ function send(action, attempt) {
 async function checkPairing() {
   if (!pairingId) return;
   try {
-    const result = await request('4A/pair', { headers: { Authorization: 'Bearer ' + pairingId } });
+    const result = await request(courseCode + '/pair', { headers: { Authorization: 'Bearer ' + pairingId } });
     if (!result.key) return;
     pairingId = undefined;
     projectionHint.textContent = '';
@@ -181,7 +183,7 @@ async function poll() {
   try {
     if (!key) await checkPairing();
     if (!key) {
-      const { phase } = await request('4A/status');
+      const { phase } = await request(courseCode + '/status');
       renderPreview(phase);
       showNotice('');
       return;
@@ -214,7 +216,7 @@ async function poll() {
     const next = await request('state');
     if (shortProjection) {
       if (sessionStorage.getItem(sessionKey) !== key) sessionStorage.setItem(sessionKey, key);
-      if (location.hash) history.replaceState(null, '', '/4A');
+      if (location.hash) history.replaceState(null, '', projectionPath);
       projectionHint.hidden = true;
       pairProjector.hidden = true;
       enable.hidden = unlocked;
@@ -232,7 +234,7 @@ async function poll() {
     if (shortProjection && error.status === 401 && !activeAttempt) {
       key = '';
       sessionStorage.removeItem(sessionKey);
-      if (location.hash) history.replaceState(null, '', '/4A');
+      if (location.hash) history.replaceState(null, '', projectionPath);
       stopRing();
       renderPreview('waiting');
       return;
@@ -336,7 +338,7 @@ fullscreen.addEventListener('click', async () => {
 pairProjector.addEventListener('click', async () => {
   pairProjector.disabled = true;
   try {
-    const { id, code } = await request('4A/pair', { method: 'POST' });
+    const { id, code } = await request(courseCode + '/pair', { method: 'POST' });
     pairingId = id;
     projectionHint.textContent = 'Código ' + code + ' · Escríbelo en «Conectar proyector» en Administración.';
     pairProjector.hidden = true;
@@ -370,7 +372,7 @@ function renderPreview(phase) {
   enable.hidden = true;
   pairProjector.hidden = Boolean(pairingId);
   projectionHint.hidden = !projectionHint.textContent;
-  get('caller').textContent = '4° Medio A';
+  get('caller').textContent = '4° Medio ' + courseCode.slice(1);
   status.textContent = labels[phase] || labels.waiting;
 }
 
