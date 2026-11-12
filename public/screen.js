@@ -8,9 +8,11 @@ const notice = get('notice');
 const enable = get('enable');
 const shortProjection = /^\/4a\/?$/i.test(location.pathname);
 const projectionHint = get('projection-hint');
+const pairProjector = get('pair-projector');
 const sessionKey = 'llamada-proyeccion-4A';
 let key;
 let finishKey;
+let pairingId;
 const labels = {
   waiting: 'Esperando la siguiente llamada', ringing: 'Llamada entrante',
   playing: 'En llamada', snoozed: 'Volverá a sonar en 5 segundos',
@@ -54,6 +56,21 @@ async function request(path, options = {}) {
 function send(action, attempt) {
   return request('action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, attempt }) });
+}
+
+async function checkPairing() {
+  if (!pairingId) return;
+  try {
+    const result = await request('4A/pair', { headers: { Authorization: 'Bearer ' + pairingId } });
+    if (!result.key) return;
+    pairingId = undefined;
+    projectionHint.textContent = '';
+    connect(result.key);
+  } catch (error) {
+    if (error.status !== 410) throw error;
+    pairingId = undefined;
+    projectionHint.textContent = error.message;
+  }
 }
 
 function prepare(mediaId) {
@@ -162,6 +179,7 @@ async function poll() {
   if ((!key && !shortProjection) || polling || busy) return;
   polling = true;
   try {
+    if (!key) await checkPairing();
     if (!key) {
       const { phase } = await request('4A/status');
       renderPreview(phase);
@@ -198,6 +216,7 @@ async function poll() {
       if (sessionStorage.getItem(sessionKey) !== key) sessionStorage.setItem(sessionKey, key);
       if (location.hash) history.replaceState(null, '', '/4A');
       projectionHint.hidden = true;
+      pairProjector.hidden = true;
       enable.hidden = unlocked;
     }
     if (!busy) {
@@ -314,6 +333,20 @@ fullscreen.addEventListener('click', async () => {
     fullscreen.textContent = 'Pantalla completa con F11';
   }
 });
+pairProjector.addEventListener('click', async () => {
+  pairProjector.disabled = true;
+  try {
+    const { id, code } = await request('4A/pair', { method: 'POST' });
+    pairingId = id;
+    projectionHint.textContent = 'Código ' + code + ' · Escríbelo en «Conectar proyector» en Administración.';
+    pairProjector.hidden = true;
+  } catch {
+    projectionHint.textContent = 'No se pudo generar el código. Vuelve a intentar.';
+  } finally {
+    pairProjector.disabled = false;
+    projectionHint.hidden = false;
+  }
+});
 document.addEventListener('fullscreenchange', () => {
   fullscreen.textContent = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
 });
@@ -335,7 +368,8 @@ function renderPreview(phase) {
   get('wave').hidden = true;
   stage.style.removeProperty('--wallpaper');
   enable.hidden = true;
-  projectionHint.hidden = false;
+  pairProjector.hidden = Boolean(pairingId);
+  projectionHint.hidden = !projectionHint.textContent;
   get('caller').textContent = '4° Medio A';
   status.textContent = labels[phase] || labels.waiting;
 }

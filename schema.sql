@@ -30,3 +30,10 @@ INSERT INTO room (id) VALUES (1), (2), (3), (4) ON CONFLICT DO NOTHING;
 ALTER TABLE tracks ADD COLUMN IF NOT EXISTS room_id integer NOT NULL DEFAULT 1 REFERENCES room(id);
 ALTER TABLE tracks DROP CONSTRAINT IF EXISTS tracks_position_key;
 CREATE UNIQUE INDEX IF NOT EXISTS tracks_room_position ON tracks (room_id, position);
+
+CREATE TABLE IF NOT EXISTS projection_pairing (
+  id uuid PRIMARY KEY,
+  code text UNIQUE NOT NULL,
+  expires_at timestamptz NOT NULL,
+  approved boolean NOT NULL DEFAULT false
+);

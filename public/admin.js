@@ -61,6 +61,7 @@ function render(data) {
   togglePanel(true);
   get('title').textContent = data.roomName;
   get('screen').href = data.screenPath;
+  get('pair-projector').hidden = !data.canPairProjection;
   get('video-upload').hidden = !data.videoEnabled;
   const signature = JSON.stringify(data);
   if (signature === lastView) return;
@@ -161,6 +162,15 @@ get('login').addEventListener('submit', event => {
 });
 get('logout').addEventListener('click', () => { logout(); feedback(''); });
 get('launch').addEventListener('click', () => task(() => post('launch')));
+get('pair-projector').addEventListener('click', () => {
+  if (busy) return;
+  const code = window.prompt('Escribe los seis dígitos que aparecen en el proyector.');
+  if (!code?.trim()) return;
+  task(async () => {
+    await post('pair', { code: code.trim() });
+    feedback('Proyector autorizado. Espera a que la grabación esté lista para lanzar la llamada.');
+  });
+});
 get('reset').addEventListener('click', () => {
   if (busy || !window.confirm('¿Volver a empezar? Todas las grabaciones quedarán pendientes en el orden actual.')) return;
   task(async () => {
