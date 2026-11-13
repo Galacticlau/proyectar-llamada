@@ -25,6 +25,10 @@ CREATE TABLE IF NOT EXISTS room (
 );
 ALTER TABLE room ADD COLUMN IF NOT EXISTS prepared_media uuid REFERENCES media(id);
 ALTER TABLE room ADD COLUMN IF NOT EXISTS prepared_until timestamptz;
+ALTER TABLE room ADD COLUMN IF NOT EXISTS preview_id uuid;
+ALTER TABLE room ADD COLUMN IF NOT EXISTS preview_track uuid REFERENCES tracks(id);
+ALTER TABLE room ADD COLUMN IF NOT EXISTS preview_status text;
+ALTER TABLE room ADD COLUMN IF NOT EXISTS preview_until timestamptz;
 ALTER TABLE room DROP CONSTRAINT IF EXISTS room_id_check;
 INSERT INTO room (id) VALUES (1), (2), (3), (4) ON CONFLICT DO NOTHING;
 ALTER TABLE tracks ADD COLUMN IF NOT EXISTS room_id integer NOT NULL DEFAULT 1 REFERENCES room(id);

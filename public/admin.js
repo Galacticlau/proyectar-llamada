@@ -9,6 +9,7 @@ let key = sessionStorage.getItem('llamada-admin') || '';
 let running = false;
 let busy = false;
 let lastView = '';
+let previewId;
 
 async function api(path, options = {}) {
   const response = await fetch('/api/admin/' + path, {
@@ -73,16 +74,31 @@ function render(data) {
   if (signature === lastView) return;
   lastView = signature;
   const playing = ['ringing', 'playing', 'snoozed'].includes(data.phase);
+  const preview = data.preview;
+  const testing = ['queued', 'starting', 'playing'].includes(preview?.status);
+  previewId = testing ? preview.id : undefined;
+  const previewLabels = {
+    queued: 'Esperando al proyector. Abre la pantalla del curso y activa el sonido',
+    starting: 'Iniciando prueba en el proyector',
+    playing: 'Probando en el proyector',
+    ended: 'Prueba finalizada',
+    stopped: 'Prueba detenida',
+    failed: 'No se pudo reproducir la prueba. Revisa la pantalla del proyector',
+    expired: 'La prueba venció. Comprueba que el proyector sigue conectado'
+  };
+  get('preview-status').hidden = !preview;
+  get('preview-status').textContent = preview ? previewLabels[preview.status] + ' · ' + preview.name : '';
+  get('stop-preview').hidden = !testing;
   const pending = data.tracks.filter(track => !track.played_at);
   get('status').textContent = data.name ? labels[data.phase] + ' · ' + data.name
     : data.tracks.length && !pending.length ? 'Se reprodujeron todas las grabaciones.' : labels[data.phase];
   get('progress').textContent = (data.tracks.length - pending.length) + ' de ' + data.tracks.length + ' reproducidos';
   const prep = data.preparation;
   const preparation = get('preparation');
-  preparation.hidden = !prep || ['ringing', 'snoozed'].includes(data.phase);
+  preparation.hidden = testing || !prep || ['ringing', 'snoozed'].includes(data.phase);
   preparation.textContent = prep ? (prep.ready ? 'Lista en el proyector: ' : 'Esperando descarga en el proyector: ') + prep.name : '';
-  get('launch').disabled = playing || !prep?.ready;
-  get('reset').disabled = playing || (!data.activeId && pending.length === data.tracks.length);
+  get('launch').disabled = playing || testing || !prep?.ready;
+  get('reset').disabled = playing || testing || (!data.activeId && pending.length === data.tracks.length);
   get('launch').textContent = ['rejected', 'interrupted'].includes(data.phase) && pending[0]?.id === data.activeId
     ? 'Volver a llamar' : 'Lanzar siguiente llamada';
   get('empty').hidden = data.tracks.length > 0;
@@ -106,6 +122,8 @@ function render(data) {
     const pendingIndex = pending.findIndex(item => item.id === track.id);
     const move = direction => task(() => post('move', { id: track.id, direction }));
     group.append(
+      makeButton('Probar en proyector', () => task(() => post('preview', { id: track.id })),
+        playing, 'Probar en proyector: ' + track.name),
       makeButton('↑', () => move('up'), playing || pendingIndex <= 0, 'Subir ' + track.name),
       makeButton('↓', () => move('down'), playing || pendingIndex < 0 || pendingIndex >= pending.length - 1, 'Bajar ' + track.name),
       makeButton('Editar nombre', () => {
@@ -168,6 +186,7 @@ get('login').addEventListener('submit', event => {
 });
 get('logout').addEventListener('click', () => { logout(); feedback(''); });
 get('launch').addEventListener('click', () => task(() => post('launch')));
+get('stop-preview').addEventListener('click', () => task(() => post('preview/stop', { id: previewId })));
 get('pair-projector').addEventListener('click', () => {
   if (busy) return;
   const code = window.prompt('Escribe los seis dígitos que aparecen en el proyector.');

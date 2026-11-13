@@ -112,6 +112,10 @@ async function withRoom(roomId, action) {
         deadline = NULL
       WHERE id = $1 AND deadline <= now() AND phase IN ('snoozed', 'playing')
     `, [roomId]);
+    await db.query(`
+      UPDATE room SET preview_status = 'expired', preview_until = NULL
+      WHERE id = $1 AND preview_until <= now()
+    `, [roomId]);
     const { rows: [room] } = await db.query('SELECT * FROM room WHERE id = $1', [roomId]);
     const data = await action(db, room);
     await db.query('COMMIT');
@@ -143,6 +147,14 @@ async function state(db, room, admin) {
     [room.track_id, room.id]);
   const next = await nextTrack(db, room);
   const config = roomsById.get(room.id);
+  const { rows: [previewTrack] } = room.preview_track ? await db.query(`
+    SELECT tracks.name, tracks.media_id, media.object_key FROM tracks
+    JOIN media ON media.id = tracks.media_id WHERE tracks.id = $1 AND tracks.room_id = $2
+  `, [room.preview_track, room.id]) : { rows: [] };
+  const preview = previewTrack ? {
+    id: room.preview_id, name: previewTrack.name, mediaId: previewTrack.media_id,
+    kind: previewTrack.object_key ? 'video' : 'audio', status: room.preview_status
+  } : null;
   const output = {
     roomName: config.name,
     phase: room.phase, attempt: room.attempt, deadline: room.deadline,
@@ -151,7 +163,8 @@ async function state(db, room, admin) {
     mediaId: active?.media_id ?? null,
     nextMedia: next?.media_id ?? null,
     kind: active ? (active.object_key ? 'video' : 'audio') : null,
-    wallpaper: room.wallpaper ? '/media/' + room.wallpaper : null
+    wallpaper: room.wallpaper ? '/media/' + room.wallpaper : null,
+    preview: admin || room.preview_until ? preview : null
   };
   if (admin) {
     const { rows } = await db.query(`
@@ -170,18 +183,59 @@ async function state(db, room, admin) {
 }
 
 async function launch(db, room) {
+  if (room.preview_until) throw new HttpError(409, 'Detén la prueba en el proyector antes de llamar.');
   if (['ringing', 'playing', 'snoozed'].includes(room.phase)) {
     throw new HttpError(409, 'Ya hay una llamada en curso o pospuesta.');
   }
   const next = await nextTrack(db, room);
   if (!next) throw new HttpError(409, 'Ya se reprodujeron todas las grabaciones de la lista.');
   if (!isPrepared(room, next)) throw new HttpError(409, 'La pantalla de proyección todavía está preparando la próxima grabación.');
-  await db.query("UPDATE room SET track_id = $1, attempt = $2, phase = 'ringing', deadline = NULL WHERE id = $3",
+  await db.query(`
+    UPDATE room SET track_id = $1, attempt = $2, phase = 'ringing', deadline = NULL,
+      preview_id = NULL, preview_track = NULL, preview_status = NULL
+    WHERE id = $3
+  `,
     [next.id, randomUUID(), room.id]);
   return { ok: true };
 }
 
+async function startPreview(db, room, id) {
+  if (!uuid.test(id || '')) throw new HttpError(400, 'Grabación inválida.');
+  if (['ringing', 'playing', 'snoozed'].includes(room.phase)) {
+    throw new HttpError(409, 'Espera a que termine la llamada antes de probar una grabación.');
+  }
+  const { rowCount } = await db.query('SELECT 1 FROM tracks WHERE id = $1 AND room_id = $2', [id, room.id]);
+  if (!rowCount) throw new HttpError(404, 'Grabación no encontrada.');
+  await db.query(`
+    UPDATE room SET preview_id = $1, preview_track = $2, preview_status = 'queued',
+      preview_until = now() + interval '5 minutes' WHERE id = $3
+  `, [randomUUID(), id, room.id]);
+  return { ok: true };
+}
+
+async function previewAction(db, room, body, admin) {
+  const { id, action } = body ?? {};
+  if (!uuid.test(id || '') || room.preview_id !== id || !room.preview_until) {
+    throw new HttpError(409, 'La prueba ya cambió o terminó.');
+  }
+  if (admin) {
+    if (action !== 'stop') throw new HttpError(400, 'Acción de prueba inválida.');
+  } else {
+    const allowed = room.preview_status === 'queued' ? ['start', 'failed'] : ['playing', 'heartbeat', 'ended', 'failed'];
+    if (!allowed.includes(action)) throw new HttpError(409, 'La prueba ya cambió o está abierta en otra pantalla.');
+  }
+  if (['start', 'playing', 'heartbeat'].includes(action)) {
+    const status = action === 'start' ? 'starting' : action === 'playing' ? 'playing' : room.preview_status;
+    await db.query("UPDATE room SET preview_status = $1, preview_until = now() + interval '45 seconds' WHERE id = $2", [status, room.id]);
+  } else {
+    const status = action === 'stop' ? 'stopped' : action;
+    await db.query('UPDATE room SET preview_status = $1, preview_until = NULL WHERE id = $2', [status, room.id]);
+  }
+  return { ok: true };
+}
+
 async function resetQueue(db, room) {
+  if (room.preview_until) throw new HttpError(409, 'Detén la prueba en el proyector antes de volver a empezar.');
   if (['ringing', 'playing', 'snoozed'].includes(room.phase)) {
     throw new HttpError(409, 'Espera a que termine la llamada para volver a empezar.');
   }
@@ -360,7 +414,9 @@ async function preload(req, res, id, roomId) {
   const { rows: [file] } = await pool.query(`
     SELECT media.mime, media.object_key, media.bytes
     FROM media JOIN tracks ON tracks.media_id = media.id
-    WHERE media.id = $1 AND tracks.room_id = $2 AND tracks.played_at IS NULL
+    JOIN room ON room.id = tracks.room_id
+    WHERE media.id = $1 AND tracks.room_id = $2
+      AND (tracks.played_at IS NULL OR (room.preview_track = tracks.id AND room.preview_until > now()))
   `, [id, roomId]);
   if (!file) throw new HttpError(404, 'Grabación no encontrada.');
   if (!file.object_key) {
@@ -451,6 +507,14 @@ async function route(req, res) {
     const roomId = config.id;
     if (method === 'GET' && path === '/api/admin/state') return json(res, 200, await withRoom(roomId, (db, room) => state(db, room, true)));
     if (method === 'POST' && path === '/api/admin/launch') return json(res, 200, await withRoom(roomId, launch));
+    if (method === 'POST' && path === '/api/admin/preview') {
+      const body = await readJson(req);
+      return json(res, 200, await withRoom(roomId, (db, room) => startPreview(db, room, body?.id)));
+    }
+    if (method === 'POST' && path === '/api/admin/preview/stop') {
+      const body = await readJson(req);
+      return json(res, 200, await withRoom(roomId, (db, room) => previewAction(db, room, { id: body?.id, action: 'stop' }, true)));
+    }
     if (method === 'POST' && path === '/api/admin/reset') return json(res, 200, await withRoom(roomId, resetQueue));
     if (method === 'POST' && path === '/api/admin/pair') {
       if (!config.projectionPath) throw new HttpError(403, 'Esta sala se abre desde Administración.');
@@ -500,6 +564,10 @@ async function route(req, res) {
     if (method === 'POST' && path === '/api/screen/action') {
       const body = await readJson(req);
       return json(res, 200, await withRoom(roomId, (db, room) => screenAction(db, room, body)));
+    }
+    if (method === 'POST' && path === '/api/screen/preview') {
+      const body = await readJson(req);
+      return json(res, 200, await withRoom(roomId, (db, room) => previewAction(db, room, body, false)));
     }
   }
   throw new HttpError(404, 'Página no encontrada.');

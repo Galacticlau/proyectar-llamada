@@ -30,6 +30,9 @@ let pendingFinish;
 let busy = false;
 let polling = false;
 let lastHeartbeat = 0;
+let activePreview;
+let previewReport;
+let previewNeedsGesture = false;
 const prepared = new Map();
 let download;
 let retryAfter = 0;
@@ -58,6 +61,11 @@ async function request(path, options = {}) {
 function send(action, attempt) {
   return request('action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action, attempt }) });
+}
+
+function reportPreview(id, action) {
+  return request('preview', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, action }) });
 }
 
 async function checkPairing() {
@@ -101,7 +109,12 @@ function prepare(mediaId) {
       }
     })
     .catch(() => {
-      if (download === current) retryAfter = Date.now() + 3000;
+      if (download !== current) return;
+      retryAfter = Date.now() + 3000;
+      if (snapshot?.preview?.mediaId === mediaId && snapshot.preview.status === 'queued') {
+        previewReport = { id: snapshot.preview.id, action: 'failed' };
+        showNotice('No se pudo cargar la grabación de prueba.');
+      }
     })
     .finally(() => {
       if (download !== current) return;
@@ -139,21 +152,23 @@ function updateTimer() {
 
 function render(data) {
   snapshot = data;
+  const testing = Boolean(activePreview && data.preview?.id === activePreview.id);
   const ringing = data.phase === 'ringing';
   const ready = ringing && prepared.has(data.mediaId);
   const playing = ['playing', 'interrupted'].includes(data.phase) && activeAttempt === data.attempt;
-  const videoPlaying = playing && data.kind === 'video';
-  stage.dataset.mode = ringing ? 'ringing' : playing ? 'active' : data.phase;
+  const videoPlaying = testing ? data.preview.kind === 'video' : playing && data.kind === 'video';
+  stage.dataset.mode = ringing ? 'ringing' : playing || testing ? 'active' : data.phase;
   stage.dataset.videoPlaying = videoPlaying;
   videoRecording.hidden = !videoPlaying;
-  get('caller').textContent = data.name || data.roomName || 'En espera';
-  if (playing) updateTimer();
+  get('caller').textContent = testing ? data.preview.name : data.name || data.roomName || 'En espera';
+  if (playing || testing) updateTimer();
+  else if (data.preview?.status === 'queued') status.textContent = unlocked ? 'Preparando prueba…' : 'Pulsa Activar sonido para probar';
   else if (ringing && !ready) status.textContent = 'Preparando grabación…';
   else status.textContent = ringing && data.kind === 'video' ? 'Videollamada entrante' : labels[data.phase];
   get('ring-actions').hidden = !ringing;
   get('answer').disabled = !ready;
   get('dots').hidden = !ringing;
-  get('wave').hidden = !playing || videoPlaying;
+  get('wave').hidden = !(playing || testing) || videoPlaying;
   get('snooze').hidden = !ringing;
   if (data.wallpaper) {
     stage.style.setProperty('--wallpaper', 'url("' + data.wallpaper + '")');
@@ -175,6 +190,74 @@ function render(data) {
     activeMedia.pause();
     activeAttempt = undefined;
   }
+}
+
+function playMedia(kind, localUrl, data) {
+  activeMedia = kind === 'video' ? videoRecording : recording;
+  render(data);
+  activeMedia.src = localUrl;
+  return activeMedia.play();
+}
+
+function stopPreview() {
+  if (!activePreview) return;
+  activePreview = undefined;
+  previewNeedsGesture = false;
+  activeMedia.pause();
+  activeMedia.removeAttribute('src');
+  activeMedia.load();
+}
+
+function finishPreview(action) {
+  previewReport = { id: activePreview.id, action };
+  stopPreview();
+  render({ ...snapshot, preview: null });
+  if (action === 'failed') showNotice('No se pudo reproducir la prueba. Activa el sonido y vuelve a probar.');
+  poll();
+}
+
+function watchPreviewPlayback(playback, id) {
+  playback.then(() => {
+    if (activePreview?.id !== id) return;
+    previewNeedsGesture = false;
+    previewReport = { id, action: 'playing' };
+    poll();
+  }).catch(error => {
+    if (activePreview?.id !== id) return;
+    if (error.name === 'NotAllowedError') {
+      previewNeedsGesture = true;
+      enable.hidden = false;
+      showNotice('Pulsa Activar sonido en esta pantalla para reproducir la prueba.');
+    } else {
+      finishPreview('failed');
+    }
+  });
+}
+
+async function handlePreview(data) {
+  const preview = data.preview;
+  if (activePreview && activePreview.id !== preview?.id) stopPreview();
+  if (activePreview && Date.now() - lastHeartbeat >= 10000) {
+    try {
+      await reportPreview(activePreview.id, 'heartbeat');
+      lastHeartbeat = Date.now();
+    } catch (error) {
+      if (error.status !== 409) throw error;
+      stopPreview();
+    }
+  }
+  if (preview?.status !== 'queued' || !unlocked || !prepared.has(preview.mediaId)) return;
+  try {
+    await reportPreview(preview.id, 'start');
+  } catch (error) {
+    if (error.status !== 409) throw error;
+    return;
+  }
+  showNotice('');
+  activePreview = preview;
+  lastHeartbeat = Date.now();
+  const playback = playMedia(preview.kind, prepared.get(preview.mediaId), data);
+  watchPreviewPlayback(playback, preview.id);
 }
 
 async function poll() {
@@ -205,6 +288,15 @@ async function poll() {
       }
       failedAttempt = undefined;
     }
+    if (previewReport) {
+      const report = previewReport;
+      try {
+        await reportPreview(report.id, report.action);
+      } catch (error) {
+        if (error.status !== 409) throw error;
+      }
+      if (previewReport === report) previewReport = undefined;
+    }
     if (activeAttempt && Date.now() - lastHeartbeat >= 10000) {
       try {
         await send('heartbeat', activeAttempt);
@@ -219,12 +311,18 @@ async function poll() {
       if (location.hash) history.replaceState(null, '', projectionPath);
       projectionHint.hidden = true;
       pairProjector.hidden = true;
-      enable.hidden = unlocked;
+      enable.hidden = unlocked && !previewNeedsGesture;
     }
     if (!busy) {
+      if (activePreview && next.preview?.id !== activePreview.id) stopPreview();
       render(next);
-      prepare(next.phase === 'ringing' ? next.mediaId : next.nextMedia);
-      await confirmPrepared(next.nextMedia);
+      if (next.preview) {
+        prepare(next.preview.mediaId);
+        await handlePreview(next);
+      } else {
+        prepare(next.phase === 'ringing' ? next.mediaId : next.nextMedia);
+        await confirmPrepared(next.nextMedia);
+      }
     }
     if (notice.dataset.connection === 'true') {
       showNotice('');
@@ -232,6 +330,7 @@ async function poll() {
     }
   } catch (error) {
     if (shortProjection && error.status === 401 && !activeAttempt) {
+      stopPreview();
       key = '';
       sessionStorage.removeItem(sessionKey);
       if (location.hash) history.replaceState(null, '', projectionPath);
@@ -263,12 +362,9 @@ async function respond(action) {
     await send(action, attempt);
     if (action === 'answer') {
       activeAttempt = attempt;
-      activeMedia = kind === 'video' ? videoRecording : recording;
       lastHeartbeat = Date.now();
-      render({ ...snapshot, phase: 'playing' });
-      activeMedia.src = localUrl;
       try {
-        await activeMedia.play();
+        await playMedia(kind, localUrl, { ...snapshot, phase: 'playing' });
       } catch {
         if (activeAttempt === attempt) failPlayback();
       }
@@ -284,12 +380,19 @@ async function respond(action) {
 
 ringtone.volume = .55;
 enable.addEventListener('click', async () => {
+  if (activePreview && previewNeedsGesture) {
+    showNotice('');
+    enable.hidden = true;
+    watchPreviewPlayback(activeMedia.play(), activePreview.id);
+    return;
+  }
   try {
     await ringtone.play();
     unlocked = true;
     enable.hidden = true;
     if (snapshot?.phase === 'ringing' && prepared.has(snapshot.mediaId)) ringingAttempt = snapshot.attempt;
     else stopRing();
+    poll();
   } catch {
     showNotice('El navegador bloqueó el sonido. Vuelve a pulsar Activar sonido.');
   }
@@ -317,13 +420,17 @@ function failPlayback() {
 
 for (const player of [recording, videoRecording]) {
   player.addEventListener('timeupdate', () => {
-    if (activeAttempt && player === activeMedia) updateTimer();
+    if ((activeAttempt || activePreview) && player === activeMedia) updateTimer();
   });
   player.addEventListener('ended', () => {
-    if (activeAttempt && player === activeMedia) finishPlayback();
+    if (player !== activeMedia) return;
+    if (activePreview) finishPreview('ended');
+    else if (activeAttempt) finishPlayback();
   });
   player.addEventListener('error', () => {
-    if (activeAttempt && player === activeMedia) failPlayback();
+    if (player !== activeMedia) return;
+    if (activePreview) finishPreview('failed');
+    else if (activeAttempt) failPlayback();
   });
 }
 const fullscreen = get('fullscreen');
