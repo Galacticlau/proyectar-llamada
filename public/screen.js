@@ -11,10 +11,12 @@ const shortProjection = Boolean(courseCode);
 const projectionPath = '/' + courseCode;
 const projectionHint = get('projection-hint');
 const pairProjector = get('pair-projector');
+const projectionLogin = get('projection-login');
 const sessionKey = 'llamada-proyeccion-' + courseCode;
 let key;
 let finishKey;
 let pairingId;
+let passwordEnabled = false;
 const labels = {
   waiting: 'Esperando la siguiente llamada', ringing: 'Llamada entrante',
   playing: 'En llamada', snoozed: 'Volverá a sonar en 5 segundos',
@@ -266,7 +268,9 @@ async function poll() {
   try {
     if (!key) await checkPairing();
     if (!key) {
-      const { phase } = await request(courseCode + '/status');
+      const { phase, passwordEnabled: enabled } = await request(courseCode + '/status');
+      if (key) return;
+      passwordEnabled = Boolean(enabled);
       renderPreview(phase);
       showNotice('');
       return;
@@ -311,6 +315,7 @@ async function poll() {
       if (location.hash) history.replaceState(null, '', projectionPath);
       projectionHint.hidden = true;
       pairProjector.hidden = true;
+      projectionLogin.hidden = true;
       enable.hidden = unlocked && !previewNeedsGesture;
     }
     if (!busy) {
@@ -456,6 +461,30 @@ pairProjector.addEventListener('click', async () => {
     projectionHint.hidden = false;
   }
 });
+projectionLogin.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (busy || key) return;
+  busy = true;
+  const input = get('projection-password');
+  try {
+    const result = await request(courseCode + '/login', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: input.value })
+    });
+    input.value = '';
+    pairingId = undefined;
+    projectionHint.textContent = '';
+    projectionHint.hidden = true;
+    projectionLogin.hidden = true;
+    connect(result.key);
+  } catch (error) {
+    projectionHint.textContent = error.message;
+    projectionHint.hidden = false;
+  } finally {
+    busy = false;
+    poll();
+  }
+});
 document.addEventListener('fullscreenchange', () => {
   fullscreen.textContent = document.fullscreenElement ? 'Salir de pantalla completa' : 'Pantalla completa';
 });
@@ -478,6 +507,7 @@ function renderPreview(phase) {
   stage.style.removeProperty('--wallpaper');
   enable.hidden = true;
   pairProjector.hidden = Boolean(pairingId);
+  projectionLogin.hidden = !passwordEnabled;
   projectionHint.hidden = !projectionHint.textContent;
   get('caller').textContent = '4° Medio ' + courseCode.slice(1);
   status.textContent = labels[phase] || labels.waiting;

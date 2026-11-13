@@ -200,6 +200,9 @@ input::file-selector-button {
 .toggle { display: flex; align-items: center; gap: .45rem; }
 .toggle input { accent-color: #e9c9ab; }
 .hint { color: #e2ccc0; margin: 0; font-size: .8rem; }
+.projection-login { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.projection-login label { color: #f5e4db; font-size: .85rem; }
+.projection-login input { min-width: 0; width: 11rem; max-width: 100%; padding: .5rem .65rem; border: 1px solid #a98573; border-radius: .55rem; color: #fff; background: #211815; font: inherit; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: .55rem; flex-wrap: wrap; }
 @keyframes reveal { from { opacity: 0; transform: translateY(12px) scale(.97); } to { opacity: 1; transform: none; } }
 @keyframes room-motion { to { transform: scale(1.19) translate(-1.8%, 1%); } }
@@ -260,6 +263,11 @@ input::file-selector-button {
   </section>
   <div class="bottom">
     <button class="chrome launch" id="enable" type="button">Activar sonido</button>
+    <form class="projection-login" id="projection-login" hidden>
+      <label for="projection-password">Contraseña de proyección</label>
+      <input id="projection-password" type="password" autocomplete="current-password" required>
+      <button class="chrome launch" type="submit">Conectar</button>
+    </form>
     <button class="chrome launch" id="pair-projector" type="button" hidden>Conectar este proyector</button>
     <p class="hint" id="projection-hint" role="status" hidden></p>
   </div>

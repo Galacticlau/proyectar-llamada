@@ -41,6 +41,11 @@ for (const room of rooms.filter(room => room.projectionPath)) {
   });
 }
 const roomsByProjectionPath = new Map(rooms.filter(room => room.projectionPath).map(room => [room.projectionPath, room]));
+const projectionPassword = process.env.APP_PROJECTION_PASSWORD;
+const projectionPasswordHash = projectionPassword
+  ? createHash('sha256').update(projectionPassword.normalize('NFC')).digest()
+  : null;
+const projectionLoginLimits = new Map();
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 const maxVideoBytes = 300 * 1024 * 1024;
 const uuid = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i;
@@ -270,6 +275,33 @@ async function remoteRoute(req, res, course, action) {
     }));
   }
   throw new HttpError(404, 'Página no encontrada.');
+}
+
+function projectionToken(config, expires) {
+  const signature = createHmac('sha256', config.screenKey)
+    .update('projection-password\0' + projectionPassword + '\0' + expires).digest('base64url');
+  return expires + '.' + signature;
+}
+
+async function projectionLogin(req, res, config) {
+  if (!projectionPasswordHash) throw new HttpError(503, 'Usa el código para conectar el proyector.');
+  const now = Date.now();
+  let limit = projectionLoginLimits.get(config.id);
+  if (!limit || now >= limit.retryAt) {
+    limit = { failures: 0, retryAt: now + 60000 };
+    projectionLoginLimits.set(config.id, limit);
+  }
+  if (limit.failures >= 8) throw new HttpError(429, 'Demasiados intentos. Espera un minuto.');
+  limit.failures++;
+  const { password } = await readJson(req) ?? {};
+  if (typeof password !== 'string' || !timingSafeEqual(
+    createHash('sha256').update(password.normalize('NFC')).digest(), projectionPasswordHash
+  )) {
+    throw new HttpError(401, 'Contraseña de proyección incorrecta.');
+  }
+  limit.failures = 0;
+  const expires = String(now + 12 * 60 * 60 * 1000);
+  return json(res, 200, { key: projectionToken(config, expires) });
 }
 
 async function startPreview(db, room, id) {
@@ -613,21 +645,26 @@ async function route(req, res) {
     if (method === 'POST' && path === '/api/admin/background') return json(res, 201, await upload(req, url, 'background', roomId));
   }
   if (path.startsWith('/api/screen/')) {
-    const courseRoute = /^\/api\/screen(\/4[ABC])\/(status|pair)$/.exec(path);
+    const courseRoute = /^\/api\/screen(\/4[ABC])\/(status|pair|login)$/.exec(path);
     if (courseRoute) {
       const [, coursePath, action] = courseRoute;
       const config = roomsByProjectionPath.get(coursePath);
       if (!config) throw new HttpError(404, 'Sala no disponible.');
       if (method === 'GET' && action === 'status') {
         const { rows: [room] } = await pool.query('SELECT phase FROM room WHERE id = $1', [config.id]);
-        return json(res, 200, { phase: room.phase });
+        return json(res, 200, { phase: room.phase, passwordEnabled: Boolean(projectionPasswordHash) });
       }
+      if (action === 'login' && method === 'POST') return projectionLogin(req, res, config);
       if (action === 'pair' && method === 'POST') return json(res, 201, await createProjectionPairing(config.id));
       if (action === 'pair' && method === 'GET') return json(res, 200, await projectionPairingStatus(req, config));
     }
-    const config = rooms.find(room => hasKey(req, room.screenKey));
-    if (!config) throw new HttpError(401, 'Abre el enlace de proyección desde Administración.');
     const requestedPath = req.headers['x-projection-path'];
+    const projectionConfig = roomsByProjectionPath.get(requestedPath);
+    const expires = /^Bearer (\d{13})\./.exec(req.headers.authorization || '')?.[1];
+    const passwordAuthorized = projectionConfig && projectionPasswordHash && expires
+      && Number(expires) > Date.now() && hasKey(req, projectionToken(projectionConfig, expires));
+    const config = passwordAuthorized ? projectionConfig : rooms.find(room => hasKey(req, room.screenKey));
+    if (!config) throw new HttpError(401, 'Conecta la pantalla de proyección del curso.');
     if (requestedPath && requestedPath !== config.projectionPath) {
       throw new HttpError(401, 'Este enlace no corresponde al curso de esta pantalla.');
     }
