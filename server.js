@@ -27,6 +27,13 @@ for (const room of rooms) {
   room.screenKey = createHmac('sha256', room.adminKey).update('pantalla').digest('base64url');
 }
 const roomsById = new Map(rooms.map(room => [room.id, room]));
+const remoteRoom = rooms.find(room => room.projectionPath === '/4A');
+const remotePassword = process.env.APP_REMOTE_KEY_4A;
+const remoteSigningKey = remoteRoom && remotePassword
+  ? createHmac('sha256', remoteRoom.adminKey).update('control-4A\0' + remotePassword).digest()
+  : null;
+let remoteFailures = 0;
+let remoteRetryAt = 0;
 const roomsByProjectionPath = new Map(rooms.filter(room => room.projectionPath).map(room => [room.projectionPath, room]));
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 const maxVideoBytes = 300 * 1024 * 1024;
@@ -40,6 +47,8 @@ const files = new Map(await Promise.all(Object.entries({
   '/': ['home.html', 'text/html'], '/admin': ['admin.html', 'text/html'],
   '/pantalla': ['screen.html', 'text/html'], '/screen.js': ['screen.js', 'text/javascript'],
   '/admin.js': ['admin.js', 'text/javascript'], '/admin.css': ['admin.css', 'text/css'],
+  '/4A-admin': ['remote-4a.html', 'text/html'],
+  '/remote-4a.js': ['remote-4a.js', 'text/javascript'],
   '/wallpaper.webp': ['wallpaper.webp', 'image/webp'], '/ringtone.mp3': ['ringtone.mp3', 'audio/mpeg']
 }).map(async ([path, [name, type]]) => [path, { type, bytes: await readFile(new URL('./public/' + name, import.meta.url)) }])));
 
@@ -197,6 +206,61 @@ async function launch(db, room) {
   `,
     [next.id, randomUUID(), room.id]);
   return { ok: true };
+}
+
+async function remoteState(db, room) {
+  const next = await nextTrack(db, room);
+  const { rows } = await db.query(`
+    SELECT id, name FROM tracks WHERE room_id = $1 AND played_at IS NULL ORDER BY position
+  `, [room.id]);
+  return {
+    phase: room.phase,
+    active: rows.find(track => track.id === room.track_id)?.name ?? null,
+    next: next ? { id: next.id, name: next.name, ready: isPrepared(room, next) } : null,
+    testing: Boolean(room.preview_until),
+    pending: rows.filter(track => room.phase !== 'playing' || track.id !== room.track_id)
+  };
+}
+
+async function remoteRoute(req, res, path) {
+  if (!remoteSigningKey) throw new HttpError(503, 'El control del 4A no está configurado.');
+  const now = Date.now();
+  const sign = value => createHmac('sha256', remoteSigningKey).update(value).digest('base64url');
+  if (req.method === 'POST' && path === '/api/4A-admin/login') {
+    if (now >= remoteRetryAt) {
+      remoteFailures = 0;
+      remoteRetryAt = now + 60000;
+    }
+    if (remoteFailures >= 8) throw new HttpError(429, 'Demasiados intentos. Espera un minuto.');
+    remoteFailures++;
+    const { password } = await readJson(req) ?? {};
+    if (typeof password !== 'string' || !timingSafeEqual(
+      createHash('sha256').update(password).digest(),
+      createHash('sha256').update(remotePassword).digest()
+    )) {
+      throw new HttpError(401, 'Contraseña incorrecta.');
+    }
+    remoteFailures = 0;
+    const expires = String(now + 8 * 60 * 60 * 1000);
+    return json(res, 200, { token: expires + '.' + sign(expires) });
+  }
+  const expires = /^Bearer (\d{13})\./.exec(req.headers.authorization || '')?.[1];
+  if (!expires || Number(expires) <= now || !hasKey(req, expires + '.' + sign(expires))) {
+    throw new HttpError(401, 'Ingresa la contraseña del control.');
+  }
+  if (req.method === 'GET' && path === '/api/4A-admin/state') {
+    return json(res, 200, await withRoom(remoteRoom.id, remoteState));
+  }
+  if (req.method === 'POST' && path === '/api/4A-admin/launch') {
+    const body = await readJson(req);
+    return json(res, 200, await withRoom(remoteRoom.id, async (db, room) => {
+      const next = await nextTrack(db, room);
+      if (!next || next.id !== body?.id) throw new HttpError(409, 'La próxima grabación cambió. Revisa la lista.');
+      await launch(db, room);
+      return remoteState(db, { ...room, phase: 'ringing', track_id: next.id });
+    }));
+  }
+  throw new HttpError(404, 'Página no encontrada.');
 }
 
 async function startPreview(db, room, id) {
@@ -501,6 +565,7 @@ async function route(req, res) {
   if ((method === 'GET' || method === 'HEAD') && path.startsWith('/media/')) {
     return media(req, res, path.slice('/media/'.length));
   }
+  if (path.startsWith('/api/4A-admin/')) return remoteRoute(req, res, path);
   if (path.startsWith('/api/admin/')) {
     const config = rooms.find(room => hasKey(req, room.adminKey));
     if (!config) throw new HttpError(401, 'Clave de administración incorrecta.');
