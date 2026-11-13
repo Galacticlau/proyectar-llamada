@@ -1,5 +1,9 @@
 const get = id => document.getElementById(id);
-const sessionKey = 'llamada-control-4A';
+const course = /^\/(4[ABC])-admin\/?$/i.exec(location.pathname)[1].toUpperCase();
+const sessionKey = 'llamada-control-' + course;
+get('course').textContent = course;
+document.title = 'Control de llamadas · ' + course;
+document.querySelector('h1').setAttribute('aria-label', document.title);
 const labels = {
   ringing: 'Sonando', playing: 'En reproducción', snoozed: 'Pospuesta',
   rejected: 'Rechazada', interrupted: 'Interrumpida'
@@ -14,7 +18,7 @@ let queueSignature;
 async function request(path, body) {
   const headers = { Authorization: 'Bearer ' + token };
   if (body) headers['Content-Type'] = 'application/json';
-  const response = await fetch('/api/4A-admin/' + path, {
+  const response = await fetch('/api/' + course + '-admin/' + path, {
     headers, method: body ? 'POST' : 'GET', body: body ? JSON.stringify(body) : undefined
   });
   const data = await response.json().catch(() => null);

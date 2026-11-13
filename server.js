@@ -27,13 +27,19 @@ for (const room of rooms) {
   room.screenKey = createHmac('sha256', room.adminKey).update('pantalla').digest('base64url');
 }
 const roomsById = new Map(rooms.map(room => [room.id, room]));
-const remoteRoom = rooms.find(room => room.projectionPath === '/4A');
-const remotePassword = process.env.APP_REMOTE_KEY_4A;
-const remoteSigningKey = remoteRoom && remotePassword
-  ? createHmac('sha256', remoteRoom.adminKey).update('control-4A\0' + remotePassword).digest()
-  : null;
-let remoteFailures = 0;
-let remoteRetryAt = 0;
+const remoteControls = new Map();
+for (const room of rooms.filter(room => room.projectionPath)) {
+  const course = room.projectionPath.slice(1);
+  const password = process.env['APP_REMOTE_KEY_' + course] || process.env.APP_REMOTE_KEY_4A;
+  if (!password) continue;
+  remoteControls.set(course, {
+    room,
+    passwordHash: createHash('sha256').update(password).digest(),
+    signingKey: createHmac('sha256', room.adminKey).update('control-' + course + '\0' + password).digest(),
+    failures: 0,
+    retryAt: 0
+  });
+}
 const roomsByProjectionPath = new Map(rooms.filter(room => room.projectionPath).map(room => [room.projectionPath, room]));
 const pool = new pg.Pool({ connectionString: DATABASE_URL, max: 10, connectionTimeoutMillis: 5000 });
 const maxVideoBytes = 300 * 1024 * 1024;
@@ -47,8 +53,10 @@ const files = new Map(await Promise.all(Object.entries({
   '/': ['home.html', 'text/html'], '/admin': ['admin.html', 'text/html'],
   '/pantalla': ['screen.html', 'text/html'], '/screen.js': ['screen.js', 'text/javascript'],
   '/admin.js': ['admin.js', 'text/javascript'], '/admin.css': ['admin.css', 'text/css'],
-  '/4A-admin': ['remote-4a.html', 'text/html'],
-  '/remote-4a.js': ['remote-4a.js', 'text/javascript'],
+  '/4A-admin': ['remote.html', 'text/html'],
+  '/4B-admin': ['remote.html', 'text/html'],
+  '/4C-admin': ['remote.html', 'text/html'],
+  '/remote.js': ['remote.js', 'text/javascript'],
   '/wallpaper.webp': ['wallpaper.webp', 'image/webp'], '/ringtone.mp3': ['ringtone.mp3', 'audio/mpeg']
 }).map(async ([path, [name, type]]) => [path, { type, bytes: await readFile(new URL('./public/' + name, import.meta.url)) }])));
 
@@ -222,25 +230,26 @@ async function remoteState(db, room) {
   };
 }
 
-async function remoteRoute(req, res, path) {
-  if (!remoteSigningKey) throw new HttpError(503, 'El control del 4A no está configurado.');
+async function remoteRoute(req, res, course, action) {
+  const control = remoteControls.get(course);
+  if (!control) throw new HttpError(503, 'El control de este curso no está configurado.');
   const now = Date.now();
-  const sign = value => createHmac('sha256', remoteSigningKey).update(value).digest('base64url');
-  if (req.method === 'POST' && path === '/api/4A-admin/login') {
-    if (now >= remoteRetryAt) {
-      remoteFailures = 0;
-      remoteRetryAt = now + 60000;
+  const sign = value => createHmac('sha256', control.signingKey).update(value).digest('base64url');
+  if (req.method === 'POST' && action === 'login') {
+    if (now >= control.retryAt) {
+      control.failures = 0;
+      control.retryAt = now + 60000;
     }
-    if (remoteFailures >= 8) throw new HttpError(429, 'Demasiados intentos. Espera un minuto.');
-    remoteFailures++;
+    if (control.failures >= 8) throw new HttpError(429, 'Demasiados intentos. Espera un minuto.');
+    control.failures++;
     const { password } = await readJson(req) ?? {};
     if (typeof password !== 'string' || !timingSafeEqual(
       createHash('sha256').update(password).digest(),
-      createHash('sha256').update(remotePassword).digest()
+      control.passwordHash
     )) {
       throw new HttpError(401, 'Contraseña incorrecta.');
     }
-    remoteFailures = 0;
+    control.failures = 0;
     const expires = String(now + 8 * 60 * 60 * 1000);
     return json(res, 200, { token: expires + '.' + sign(expires) });
   }
@@ -248,12 +257,12 @@ async function remoteRoute(req, res, path) {
   if (!expires || Number(expires) <= now || !hasKey(req, expires + '.' + sign(expires))) {
     throw new HttpError(401, 'Ingresa la contraseña del control.');
   }
-  if (req.method === 'GET' && path === '/api/4A-admin/state') {
-    return json(res, 200, await withRoom(remoteRoom.id, remoteState));
+  if (req.method === 'GET' && action === 'state') {
+    return json(res, 200, await withRoom(control.room.id, remoteState));
   }
-  if (req.method === 'POST' && path === '/api/4A-admin/launch') {
+  if (req.method === 'POST' && action === 'launch') {
     const body = await readJson(req);
-    return json(res, 200, await withRoom(remoteRoom.id, async (db, room) => {
+    return json(res, 200, await withRoom(control.room.id, async (db, room) => {
       const next = await nextTrack(db, room);
       if (!next || next.id !== body?.id) throw new HttpError(409, 'La próxima grabación cambió. Revisa la lista.');
       await launch(db, room);
@@ -556,7 +565,9 @@ async function route(req, res) {
     return json(res, 200, { ok: true });
   }
   const projectionPath = path.replace(/\/$/, '').toUpperCase();
-  const pagePath = roomsByProjectionPath.has(projectionPath) ? '/pantalla' : path;
+  const remotePage = /^\/(4[ABC])-ADMIN$/.exec(projectionPath);
+  const pagePath = remotePage ? '/' + remotePage[1] + '-admin'
+    : roomsByProjectionPath.has(projectionPath) ? '/pantalla' : path;
   if (method === 'GET' && files.has(pagePath)) {
     const file = files.get(pagePath);
     const type = file.type.startsWith('text/') ? file.type + '; charset=utf-8' : file.type;
@@ -565,7 +576,8 @@ async function route(req, res) {
   if ((method === 'GET' || method === 'HEAD') && path.startsWith('/media/')) {
     return media(req, res, path.slice('/media/'.length));
   }
-  if (path.startsWith('/api/4A-admin/')) return remoteRoute(req, res, path);
+  const remoteApi = /^\/api\/(4[ABC])-admin\/(login|state|launch)$/.exec(path);
+  if (remoteApi) return remoteRoute(req, res, remoteApi[1], remoteApi[2]);
   if (path.startsWith('/api/admin/')) {
     const config = rooms.find(room => hasKey(req, room.adminKey));
     if (!config) throw new HttpError(401, 'Clave de administración incorrecta.');
