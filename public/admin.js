@@ -122,18 +122,14 @@ function render(data) {
     const pendingIndex = pending.findIndex(item => item.id === track.id);
     const move = direction => task(() => post('move', { id: track.id, direction }));
     group.append(
-      makeButton('Probar en proyector', () => task(() => post('preview', { id: track.id })),
-        playing, 'Probar en proyector: ' + track.name),
       makeButton('↑', () => move('up'), playing || pendingIndex <= 0, 'Subir ' + track.name),
       makeButton('↓', () => move('down'), playing || pendingIndex < 0 || pendingIndex >= pending.length - 1, 'Bajar ' + track.name),
       makeButton('Editar nombre', () => {
         const name = window.prompt('Nombre en pantalla', track.name);
         if (name?.trim() && name.trim() !== track.name) task(() => post('rename', { id: track.id, name }));
       }),
-      makeButton('Copiar enlace', () => task(async () => {
-        await navigator.clipboard.writeText(new URL('/media/' + track.media_id, location.origin).href);
-        feedback('Enlace copiado.');
-      }))
+      makeButton('Probar en proyector', () => task(() => post('preview', { id: track.id })),
+        playing, 'Probar en proyector: ' + track.name)
     );
     controls.append(group);
     return row;
